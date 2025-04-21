@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
 import os
-import time
 import json
 import requests
 import argparse
+import asyncio
+import httpx
+import traceback
+import logging
+import time
 from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Batch‑convert a folder of PDFs to Mathpix‑Markdown")
+        description="Batch‑convert a folder of PDFs to Mathpix‑Markdown using streaming")
     p.add_argument("input", help="Path to PDF file or directory of PDFs")
     p.add_argument("-o", "--out-dir",
                    help="Directory to write .mmd files (default: same as PDF folder)")
+    p.add_argument("-v", "--verbose", action="store_true", 
+                   help="Enable verbose logging")
+    p.add_argument("--skip-status-check", action="store_true",
+                   help="Skip final status check (use when all pages are received via streaming)")
     return p.parse_args()
 
 def get_pdf_list(path):
@@ -24,71 +37,292 @@ def get_pdf_list(path):
     else:
         raise ValueError(f"No PDF(s) found at {path!r}")
 
-def convert_pdf(pdf_path, out_path, headers, options):
+async def convert_pdf_streaming(pdf_path, out_path, headers, options):
+    pdf_name = os.path.basename(pdf_path)
+    
+    # Add streaming option
+    options["streaming"] = True
+    
     # 1) submit PDF
-    with open(pdf_path, "rb") as f:
-        resp = requests.post(
-            "https://api.mathpix.com/v3/pdf",
-            headers=headers,
-            files={"file": f},
-            data={"options_json": json.dumps(options)}
-        )
-    resp.raise_for_status()
-    pdf_id = resp.json()["pdf_id"]
-    print(f"[{os.path.basename(pdf_path)}] submitted → pdf_id={pdf_id}")
+    logger.info(f"[{pdf_name}] Submitting PDF...")
+    pdf_id = None
+    
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            with open(pdf_path, "rb") as f:
+                files = {"file": f}
+                data = {"options_json": json.dumps(options)}
+                
+                logger.debug(f"[{pdf_name}] POST request with options: {options}")
+                
+                resp = await client.post(
+                    "https://api.mathpix.com/v3/pdf",
+                    headers=headers,
+                    files=files,
+                    data=data
+                )
+            
+            logger.debug(f"HTTP Request: POST https://api.mathpix.com/v3/pdf \"{resp.status_code} {resp.reason_phrase}\"")
+            resp.raise_for_status()
+            response_json = resp.json()
+            logger.debug(f"[{pdf_name}] Submit response: {response_json}")
+            
+            pdf_id = response_json["pdf_id"]
+            logger.info(f"[{pdf_name}] submitted → pdf_id={pdf_id}")
+            
+            # 2) Stream results and write to file incrementally
+            stream_url = f"https://api.mathpix.com/v3/pdf/{pdf_id}/stream"
+            logger.info(f"[{pdf_name}] Starting stream from {stream_url}...")
+            
+            # Create/open the output file
+            with open(out_path, "w", encoding="utf8") as outf:
+                content = {}  # Using dict for page index to content mapping
+                expected_total_pages = 0
+                
+                try:
+                    logger.debug(f"[{pdf_name}] Establishing stream connection...")
+                    
+                    # Using a longer timeout for stream connection
+                    async with client.stream("GET", stream_url, headers=headers, timeout=300.0) as stream:
+                        logger.debug(f"HTTP Request: GET {stream_url} \"{stream.status_code} {stream.reason_phrase}\"")
+                        stream.raise_for_status()
+                        logger.debug(f"[{pdf_name}] Stream connection established")
+                        
+                        # Process each line of the stream
+                        async for line in stream.aiter_lines():
+                            if not line.strip():
+                                continue
+                                
+                            try:
+                                logger.debug(f"[{pdf_name}] Received line: {line[:100]}...")
+                                data = json.loads(line)
+                                page_idx = data.get("page_idx", 0)
+                                text = data.get("text", "")
+                                total_pages = data.get("pdf_selected_len", 0)
+                                
+                                if total_pages > 0:
+                                    expected_total_pages = total_pages
+                                
+                                # Store content by page index
+                                content[page_idx] = text
+                                
+                                logger.info(f"[{pdf_name}] Received page {page_idx}/{expected_total_pages}")
+                                
+                                # Write current progress to file
+                                # Sort by page index to ensure correct order
+                                sorted_content = [content.get(i, "") for i in range(1, max(content.keys()) + 1)]
+                                full_content = "".join(sorted_content)
+                                
+                                outf.seek(0)
+                                outf.truncate()
+                                outf.write(full_content)
+                                outf.flush()
+                                
+                                # Check if we have all pages
+                                if (expected_total_pages > 0 and 
+                                    len(content) >= expected_total_pages and
+                                    all(i in content for i in range(1, expected_total_pages + 1))):
+                                    logger.info(f"[{pdf_name}] All {expected_total_pages} pages received!")
+                                    break
+                                
+                            except json.JSONDecodeError:
+                                logger.error(f"[{pdf_name}] Failed to decode line: {line}")
+                                
+                except httpx.HTTPStatusError as e:
+                    logger.error(f"[{pdf_name}] HTTP error during streaming: {e.response.status_code} - {e.response.text}")
+                    raise
+                except httpx.ReadTimeout as e:
+                    logger.error(f"[{pdf_name}] Timeout during streaming: {e}")
+                    # If we have content but hit a timeout, we may still have a valid result
+                    if len(content) > 0:
+                        logger.warning(f"[{pdf_name}] Stream timeout, but {len(content)} pages were received")
+                    else:
+                        raise
+                except Exception as e:
+                    logger.error(f"[{pdf_name}] Error during streaming: {e}")
+                    logger.error(traceback.format_exc())
+                    raise
+                
+                # Final check - did we get all the pages?
+                if expected_total_pages > 0 and len(content) < expected_total_pages:
+                    logger.warning(f"[{pdf_name}] Only received {len(content)}/{expected_total_pages} pages")
+                else:
+                    logger.info(f"[{pdf_name}] Completed and saved → {out_path}")
+                    
+                return pdf_id, len(content), expected_total_pages
+                    
+    except Exception as e:
+        logger.error(f"[{pdf_name}] Conversion failed: {e}")
+        logger.error(traceback.format_exc())
+        
+        # If we have a pdf_id but streaming failed, we can fall back to non-streaming method
+        if pdf_id:
+            logger.info(f"[{pdf_name}] Attempting fallback to non-streaming method...")
+            return await fallback_pdf_download(pdf_id, pdf_name, out_path, headers)
+        else:
+            raise
 
-    # 2) poll status
-    status_url = f"https://api.mathpix.com/v3/pdf/{pdf_id}"
-    while True:
-        r = requests.get(status_url, headers=headers)
-        r.raise_for_status()
-        status = r.json().get("status")
-        if status == "completed":
-            break
-        if status == "error":
-            raise RuntimeError(f"Conversion failed for {pdf_path}")
-        time.sleep(1)
+async def fallback_pdf_download(pdf_id, pdf_name, out_path, headers):
+    """Fallback method to download the MMD file if streaming fails"""
+    try:
+        max_wait_time = 300  # 5 minutes
+        start_time = time.time()
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # First check status
+            status_url = f"https://api.mathpix.com/v3/pdf/{pdf_id}"
+            logger.info(f"[{pdf_name}] Checking PDF status at {status_url}")
+            
+            while True:
+                r = await client.get(status_url, headers=headers)
+                logger.debug(f"HTTP Request: GET {status_url} \"{r.status_code} {r.reason_phrase}\"")
+                r.raise_for_status()
+                status_data = r.json()
+                status = status_data.get("status")
+                
+                logger.info(f"[{pdf_name}] PDF status: {status}")
+                logger.debug(f"[{pdf_name}] Status data: {status_data}")
+                
+                if status == "completed":
+                    break
+                if status == "error":
+                    error_msg = status_data.get("error", "Unknown error")
+                    raise RuntimeError(f"Conversion failed for {pdf_name}: {error_msg}")
+                
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed > max_wait_time:
+                    logger.warning(f"[{pdf_name}] Timeout waiting for PDF processing after {elapsed:.1f}s")
+                    break
+                
+                # Get progress info
+                percent_done = status_data.get("percent_done", 0)
+                num_pages = status_data.get("num_pages", 0)
+                num_pages_completed = status_data.get("num_pages_completed", 0)
+                
+                logger.info(f"[{pdf_name}] Processing: {percent_done:.1f}% ({num_pages_completed}/{num_pages} pages)")
+                await asyncio.sleep(5)
+            
+            # Download MMD even if status is not "completed" - we might have partial results
+            mmd_url = f"https://api.mathpix.com/v3/pdf/{pdf_id}.mmd"
+            logger.info(f"[{pdf_name}] Downloading MMD from {mmd_url}")
+            
+            r = await client.get(mmd_url, headers=headers)
+            logger.debug(f"HTTP Request: GET {mmd_url} \"{r.status_code} {r.reason_phrase}\"")
+            
+            if r.status_code == 404:
+                logger.error(f"[{pdf_name}] MMD file not available yet (404)")
+                return pdf_id, 0, 0
+                
+            r.raise_for_status()
+            mmd = r.text
+            
+            # Write file
+            with open(out_path, "w", encoding="utf8") as outf:
+                outf.write(mmd)
+                
+            logger.info(f"[{pdf_name}] Fallback method successful, saved → {out_path}")
+            
+            # Get approximate page count from status data
+            num_pages = status_data.get("num_pages", 0)
+            num_pages_completed = status_data.get("num_pages_completed", 0)
+            
+            return pdf_id, num_pages_completed, num_pages
+            
+    except Exception as e:
+        logger.error(f"[{pdf_name}] Fallback method failed: {e}")
+        logger.error(traceback.format_exc())
+        raise RuntimeError(f"Failed to convert {pdf_name} using both methods")
 
-    # 3) download .mmd
-    mmd = requests.get(f"https://api.mathpix.com/v3/pdf/{pdf_id}.mmd",
-                       headers=headers).text
+async def check_pdf_status(pdf_id, pdf_name, headers, skip_status_check=False):
+    """Check the final status of a PDF after streaming/conversion"""
+    if skip_status_check:
+        logger.info(f"[{pdf_name}] Skipping final status check as requested")
+        return True
+        
+    try:
+        status_url = f"https://api.mathpix.com/v3/pdf/{pdf_id}"
+        async with httpx.AsyncClient() as client:
+            r = await client.get(status_url, headers=headers)
+            logger.debug(f"HTTP Request: GET {status_url} \"{r.status_code} {r.reason_phrase}\"")
+            r.raise_for_status()
+            status_data = r.json()
+            status = status_data.get("status")
+            
+            if status == "completed":
+                logger.info(f"[{pdf_name}] Final status check: PDF processing is complete")
+                return True
+            elif status == "split" or status == "processing":
+                # This is normal with streaming - we have the content before processing fully completes
+                logger.info(f"[{pdf_name}] PDF backend processing still in progress (status: {status})")
+                logger.info(f"[{pdf_name}] This is normal when using streaming - your output file should be complete")
+                return True
+            else:
+                logger.warning(f"[{pdf_name}] Unexpected status: {status}")
+                return False
+                
+    except Exception as e:
+        logger.error(f"[{pdf_name}] Error checking final status: {e}")
+        return False
 
-    # 4) write file
-    with open(out_path, "w", encoding="utf8") as outf:
-        outf.write(mmd)
-    print(f"[{os.path.basename(pdf_path)}] saved → {out_path}")
-
-def main():
+async def async_main():
     args = parse_args()
+    
+    # Set logging level based on verbose flag
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+    
     load_dotenv()
-
-    APP_ID  = os.getenv("MATHPIX_APP_ID")
+    
+    APP_ID = os.getenv("MATHPIX_APP_ID")
     APP_KEY = os.getenv("MATHPIX_APP_KEY")
+    
     if not APP_ID or not APP_KEY:
         raise RuntimeError("Set MATHPIX_APP_ID and MATHPIX_APP_KEY in your .env")
-
+    
     headers = {"app_id": APP_ID, "app_key": APP_KEY}
+    logger.debug(f"Using app_id: {APP_ID}")
+    
     # you can tweak these options as needed
     options = {
         "math_inline_delimiters": ["$", "$"],
         "rm_spaces": True
     }
-
+    
     pdfs = get_pdf_list(args.input)
     if not pdfs:
-        print("No PDFs found.")
+        logger.info("No PDFs found.")
         return
-
+        
     out_dir = args.out_dir or os.path.dirname(os.path.abspath(pdfs[0]))
     os.makedirs(out_dir, exist_ok=True)
-
+    
+    # Process PDFs one at a time
     for pdf in pdfs:
         base = os.path.splitext(os.path.basename(pdf))[0]
         out_file = os.path.join(out_dir, f"{base}.mmd")
         try:
-            convert_pdf(pdf, out_file, headers, options)
+            result = await convert_pdf_streaming(pdf, out_file, headers, options)
+            
+            if isinstance(result, tuple) and len(result) == 3:
+                pdf_id, pages_received, total_pages = result
+                
+                if pages_received > 0 and pages_received >= total_pages:
+                    logger.info(f"[{os.path.basename(pdf)}] Successfully received all pages ({pages_received}/{total_pages})")
+                elif pages_received > 0:
+                    logger.warning(f"[{os.path.basename(pdf)}] Partial content: received {pages_received}/{total_pages} pages")
+                
+                # Verify completion with a status check
+                await check_pdf_status(pdf_id, os.path.basename(pdf), headers, args.skip_status_check)
+            else:
+                logger.warning(f"[{os.path.basename(pdf)}] Unexpected result format: {result}")
+                    
         except Exception as e:
-            print(f"Error with {pdf}: {e}")
+            logger.error(f"Error with {pdf}: {e}")
+            logger.error(traceback.format_exc())
+
+def main():
+    asyncio.run(async_main())
 
 if __name__ == "__main__":
     main()
