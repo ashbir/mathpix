@@ -547,7 +547,8 @@ async def async_main():
     # you can tweak these options as needed
     options = {
         "math_inline_delimiters": ["$", "$"],
-        "rm_spaces": True
+        "rm_spaces": True,
+        "include_equation_tags": True,
     }
     
     pdfs = get_pdf_list(args.input)
