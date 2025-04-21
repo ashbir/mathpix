@@ -383,15 +383,66 @@ async def check_pdf_status(pdf_id, pdf_name, headers, skip_status_check=False):
         return False
 
 async def process_batch(pdfs, out_dir, headers, options, skip_status_check=False, show_progress=True):
-    """Process a batch of PDFs with a batch progress bar"""
+    """Process a batch of PDFs with a page-based progress bar"""
     results = []
+    total_pages = 0
+    completed_pages = 0
     
-    # Create overall progress bar for all PDFs
+    # First, determine total page count by checking each PDF
+    if show_progress and len(pdfs) > 1:
+        print("Checking PDFs to count pages...")
+        page_count_progress = tqdm(
+            total=len(pdfs),
+            desc="Counting pages",
+            unit="PDF",
+            position=0,
+            leave=True
+        )
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for pdf in pdfs:
+                pdf_name = os.path.basename(pdf)
+                try:
+                    # Get PDF page count by submitting it first
+                    with open(pdf, "rb") as f:
+                        files = {"file": f}
+                        data = {"options_json": json.dumps(options)}
+                        resp = await client.post(
+                            "https://api.mathpix.com/v3/pdf",
+                            headers=headers,
+                            files=files,
+                            data=data
+                        )
+                    resp.raise_for_status()
+                    pdf_id = resp.json()["pdf_id"]
+                    
+                    # Check status to get page count
+                    status_url = f"https://api.mathpix.com/v3/pdf/{pdf_id}"
+                    for _ in range(5):  # Try a few times
+                        r = await client.get(status_url, headers=headers)
+                        r.raise_for_status()
+                        status_data = r.json()
+                        num_pages = status_data.get("num_pages", 0)
+                        if num_pages > 0:
+                            total_pages += num_pages
+                            break
+                        await asyncio.sleep(1)
+                except Exception as e:
+                    logger.warning(f"Could not determine page count for {pdf_name}: {e}")
+                    # Assume a default of 5 pages if we can't determine
+                    total_pages += 5
+                
+                page_count_progress.update(1)
+        
+        page_count_progress.close()
+        print(f"Found {total_pages} total pages across {len(pdfs)} PDFs")
+    
+    # Create overall progress bar for all pages
     if show_progress and len(pdfs) > 1:
         batch_progress = tqdm(
-            total=len(pdfs),
+            total=total_pages,
             desc="Overall progress",
-            unit="PDF",
+            unit="page",
             position=0,
             leave=True
         )
@@ -402,27 +453,30 @@ async def process_batch(pdfs, out_dir, headers, options, skip_status_check=False
         for i, pdf in enumerate(pdfs):
             base = os.path.splitext(os.path.basename(pdf))[0]
             out_file = os.path.join(out_dir, f"{base}.mmd")
-            
             try:
                 if len(pdfs) > 1 and not logger.verbose and show_progress:
                     print(f"\nProcessing {i+1}/{len(pdfs)}: {os.path.basename(pdf)}")
                 logger.info(f"Processing PDF {i+1}/{len(pdfs)}: {os.path.basename(pdf)}")
-                
                 result = await convert_pdf_streaming(
-                    pdf, 
-                    out_file, 
-                    headers, 
-                    options, 
+                    pdf,
+                    out_file,
+                    headers,
+                    options,
                     show_progress
                 )
-                
                 if isinstance(result, tuple) and len(result) == 3:
-                    pdf_id, pages_received, total_pages = result
-                    
-                    if pages_received > 0 and pages_received >= total_pages:
-                        logger.info(f"[{os.path.basename(pdf)}] Successfully received all pages ({pages_received}/{total_pages})")
+                    pdf_id, pages_received, total_pages_in_pdf = result
+                    if pages_received > 0 and pages_received >= total_pages_in_pdf:
+                        logger.info(f"[{os.path.basename(pdf)}] Successfully received all pages ({pages_received}/{total_pages_in_pdf})")
                     elif pages_received > 0:
-                        logger.warning(f"[{os.path.basename(pdf)}] Partial content: received {pages_received}/{total_pages} pages")
+                        logger.warning(f"[{os.path.basename(pdf)}] Partial content: received {pages_received}/{total_pages_in_pdf} pages")
+                    
+                    # Update overall progress by the number of pages we processed
+                    completed_pages += pages_received
+                    if show_progress and batch_progress:
+                        # Update to reflect actual pages processed
+                        batch_progress.n = completed_pages
+                        batch_progress.refresh()
                     
                     # Verify completion with a status check
                     success = await check_pdf_status(pdf_id, os.path.basename(pdf), headers, skip_status_check)
@@ -431,7 +485,7 @@ async def process_batch(pdfs, out_dir, headers, options, skip_status_check=False
                         "out_file": out_file,
                         "pdf_id": pdf_id,
                         "pages_received": pages_received,
-                        "total_pages": total_pages,
+                        "total_pages": total_pages_in_pdf,
                         "success": success
                     })
                 else:
@@ -442,7 +496,6 @@ async def process_batch(pdfs, out_dir, headers, options, skip_status_check=False
                         "success": False,
                         "error": "Unexpected result format"
                     })
-                    
             except Exception as e:
                 logger.error(f"Error with {pdf}: {e}")
                 logger.error(traceback.format_exc())
@@ -452,22 +505,21 @@ async def process_batch(pdfs, out_dir, headers, options, skip_status_check=False
                     "success": False,
                     "error": str(e)
                 })
-            
-            # Update batch progress
-            if show_progress and batch_progress:
-                batch_progress.update(1)
-                
     finally:
         if show_progress and batch_progress:
             batch_progress.close()
     
     # Summary
+    total_pages_processed = sum(r.get("pages_received", 0) for r in results)
+    total_pages_expected = sum(r.get("total_pages", 0) for r in results)
     success_count = sum(1 for r in results if r.get("success", False))
     
     if not logger.verbose and show_progress and len(pdfs) > 1:
         print(f"\nConversion complete: {success_count}/{len(pdfs)} PDFs converted successfully")
+        print(f"Processed {total_pages_processed}/{total_pages_expected} pages")
     
     logger.info(f"Batch processing complete: {success_count}/{len(pdfs)} PDFs converted successfully")
+    logger.info(f"Processed {total_pages_processed}/{total_pages_expected} pages")
     
     return results
 
