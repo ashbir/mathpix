@@ -11,7 +11,7 @@ def parse_args():
     p.add_argument("pdf",
                    help="Path to input PDF file")
     p.add_argument("-o", "--out",
-                   help="Path to output .mmd file (default: <pdf_id>.mmd)")
+                   help="Path to output .mmd file (default: <pdf_basename>.mmd)")
     return p.parse_args()
 
 def main():
@@ -62,8 +62,14 @@ def main():
     r.raise_for_status()
     markdown = r.text
 
-    # 5. write output
-    out_file = args.out or f"{pdf_id}.mmd"
+    # 5. determine output filename
+    if args.out:
+        out_file = args.out
+    else:
+        base = os.path.splitext(os.path.basename(pdf_path))[0]
+        out_file = f"{base}.mmd"
+
+    # 6. write output
     with open(out_file, "w", encoding="utf8") as f:
         f.write(markdown)
     print(f"Saved Mathpix‑Markdown to {out_file}")
