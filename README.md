@@ -100,7 +100,3 @@ See the [Mathpix API documentation](https://mathpix.com/docs/api/v3/pdf) for add
 - **API Key Errors**: Ensure your `.env` file contains valid Mathpix API credentials
 - **Timeout Errors**: For large PDFs, consider increasing timeout values in the code
 - **Streaming Issues**: If streaming consistently fails, try using the `--skip-status-check` flag
-
-## License
-
-This tool is provided as-is with no warranty. Use at your own risk.
