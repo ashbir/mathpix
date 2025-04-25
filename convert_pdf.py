@@ -192,6 +192,40 @@ class MathpixClient:
             logger.debug(f"HTTP Request: GET {self.PDF_RESULTS_ENDPOINT} \"{resp.status_code} {resp.reason_phrase}\"")
             resp.raise_for_status()
             return resp.json()
+    
+    async def delete_document(self, pdf_id: str) -> Dict[str, Any]:
+        """Delete a document from the Mathpix server
+        
+        Args:
+            pdf_id: The ID of the PDF document to delete
+            
+        Returns:
+            Dictionary containing the response from the server
+        """
+        logger.info(f"Deleting document with ID: {pdf_id}")
+        
+        url = f"{self.PDF_ENDPOINT}/{pdf_id}"
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.delete(
+                url,
+                headers=self.headers
+            )
+            
+            logger.debug(f"HTTP Request: DELETE {url} \"{resp.status_code} {resp.reason_phrase}\"")
+            
+            # The Mathpix API returns 204 No Content for successful deletion
+            # but may also return 200 OK in some cases
+            if resp.status_code == 204 or resp.status_code == 200:
+                return {"success": True, "message": f"Document {pdf_id} deleted successfully"}
+            
+            resp.raise_for_status()
+            
+            # If the response contains JSON data, return it
+            try:
+                return resp.json()
+            except:
+                return {"success": False, "message": f"Unexpected response from server: {resp.text}"}
 
 class PDFConverter:
     """Handles the conversion of PDFs to Mathpix Markdown"""
@@ -650,6 +684,8 @@ def parse_args():
                    help="Hide progress bars (only show log messages)")
     p.add_argument("--list-documents", action="store_true",
                    help="List all documents previously processed by the Mathpix API")
+    p.add_argument("--delete-document", 
+                   help="Delete a document from the Mathpix server using its PDF ID")
     p.add_argument("--page", type=int, default=1,
                    help="Page number for listing documents (default: 1)")
     p.add_argument("--per-page", type=int, default=50,
@@ -751,9 +787,27 @@ async def async_main():
             print(f"Error retrieving documents: {e}")
             return
     
-    # Validate input parameter is provided when not listing documents
+    # Handle delete document option
+    if args.delete_document:
+        pdf_id = args.delete_document
+        print(f"\nDeleting document with ID: {pdf_id}...")
+        
+        try:
+            response = await client.delete_document(pdf_id)
+            if response.get("success"):
+                print(f"✅ Document {pdf_id} deleted successfully.")
+                print("\nNote: The document may still appear in listings for a short time due to server-side caching.")
+                print("If you need to confirm deletion, wait a few minutes and run --list-documents again.")
+            else:
+                print(f"❌ Failed to delete document {pdf_id}: {response.get('message', 'Unknown error')}")
+            return
+        except Exception as e:
+            print(f"❌ Error deleting document: {e}")
+            return
+    
+    # Validate input parameter is provided when not listing or deleting documents
     if not args.input:
-        print("Error: The 'input' argument is required when not using --list-documents.")
+        print("Error: The 'input' argument is required when not using --list-documents or --delete-document.")
         print("Use --help for more information.")
         return
     
