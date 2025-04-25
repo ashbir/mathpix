@@ -293,6 +293,21 @@ class PDFConverter:
                     logger.warning(f"[{pdf_name}] Stream timeout, but {len(content)} pages were received")
                 else:
                     raise
+            except httpx.RemoteProtocolError as e:
+                logger.error(f"[{pdf_name}] Remote protocol error during streaming: {e}")
+                # If we have content but hit a connection issue, try to use what we have
+                if len(content) > 0:
+                    logger.warning(f"[{pdf_name}] Stream connection dropped, but {len(content)} pages were received")
+                    # Write current progress to file
+                    sorted_content = [content.get(i, "") for i in range(1, max(content.keys()) + 1) if i in content]
+                    full_content = "".join(sorted_content)
+                    
+                    outf.seek(0)
+                    outf.truncate()
+                    outf.write(full_content)
+                    outf.flush()
+                else:
+                    raise
             except Exception as e:
                 logger.error(f"[{pdf_name}] Error during streaming: {e}")
                 logger.error(traceback.format_exc())
