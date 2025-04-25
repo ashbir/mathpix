@@ -1123,6 +1123,7 @@ async def async_main():
         "math_inline_delimiters": ["$", "$"],
         "rm_spaces": True,
         "include_equation_tags": True,
+        "enable_tables_fallback": True,  # Enable advanced table processing algorithm
     }
     
     # Handle list documents option
