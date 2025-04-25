@@ -10,6 +10,9 @@ import time
 import sys
 import hashlib
 import uuid
+import re
+import requests
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional, Any, Union
@@ -65,6 +68,123 @@ def get_anonymized_filename(file_path: str, method: str = 'hash') -> str:
         The anonymized filename that would be used when uploading to Mathpix
     """
     return anonymize_filename(file_path, method)
+
+# Add function to download images from Mathpix CDN
+def download_mathpix_image(url: str, output_dir: str) -> str:
+    """
+    Download an image from a Mathpix CDN URL and save it to the output directory.
+    
+    Args:
+        url: The URL of the image to download
+        output_dir: The directory to save the image to
+        
+    Returns:
+        The path to the saved image
+    """
+    try:
+        # Clean URL by properly handling backslashes in query parameters
+        url = url.replace('\\&', '&')
+        
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        
+        # Parse the URL to extract information for the filename
+        parsed_url = urlparse(url)
+        path_parts = parsed_url.path.split('/')
+        filename = path_parts[-1]
+        
+        # Extract parameters for a more descriptive filename
+        query_params = {}
+        if parsed_url.query:
+            for param in parsed_url.query.split('&'):
+                if '=' in param:
+                    key, value = param.split('=', 1)
+                    query_params[key] = value
+
+        # Create a descriptive filename based on URL parameters
+        if 'top_left_x' in query_params and 'top_left_y' in query_params and 'width' in query_params and 'height' in query_params:
+            base_name = os.path.splitext(filename)[0]
+            ext = os.path.splitext(filename)[1]
+            new_filename = f"{base_name}_x{query_params['top_left_x']}_y{query_params['top_left_y']}_w{query_params['width']}_h{query_params['height']}{ext}"
+        else:
+            new_filename = filename
+
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Save the image to the output directory
+        image_path = os.path.join(output_dir, new_filename)
+        with open(image_path, 'wb') as f:
+            f.write(response.content)
+        
+        return image_path
+        
+    except Exception as e:
+        logger.error(f"Failed to download {url}: {e}")
+        return None
+
+# Add function to process a markdown file and download images
+def process_markdown_images(file_path: str, download_images: bool = True):
+    """
+    Process a markdown file to download images and update image references.
+    
+    Args:
+        file_path: Path to the markdown file
+        download_images: Whether to download images (default: True)
+        
+    Returns:
+        Number of images processed
+    """
+    if not download_images:
+        return 0
+        
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Get the filename without extension to use as the image directory name
+        file_basename = os.path.basename(file_path)
+        file_name_without_ext = os.path.splitext(file_basename)[0]
+        
+        # Create directory with the same name as the markdown file
+        output_dir = os.path.join(os.path.dirname(file_path), file_name_without_ext)
+        
+        # Regular expression to find image links
+        image_pattern = r'!\[(.*?)\]\((https?://cdn\.mathpix\.com/cropped/.*?)\)'
+        
+        # Count replacements
+        replacement_count = 0
+        
+        def replace_image_link(match):
+            nonlocal replacement_count
+            alt_text = match.group(1)
+            image_url = match.group(2)
+            
+            # Download the image
+            local_image_path = download_mathpix_image(image_url, output_dir)
+            
+            if local_image_path:
+                # Get relative path from markdown file to image
+                rel_path = os.path.relpath(local_image_path, os.path.dirname(file_path))
+                replacement_count += 1
+                return f'![{alt_text}]({rel_path})'
+            else:
+                # If download failed, keep the original link
+                return match.group(0)
+        
+        # Replace image links in content
+        updated_content = re.sub(image_pattern, replace_image_link, content)
+        
+        # Save updated content back to the file
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(updated_content)
+        
+        logger.info(f"Updated {replacement_count} image links in {file_path}")
+        return replacement_count
+        
+    except Exception as e:
+        logger.error(f"Error processing {file_path}: {e}")
+        return 0
 
 class ConditionalLogger:
     """Custom logger that respects verbose flag"""
@@ -422,10 +542,16 @@ class PDFConverter:
         self.options = options or {}
         self.show_progress = show_progress
         
-    async def convert_with_streaming(self, pdf_path: str, out_path: str, anonymize_method: str = 'hash') -> Tuple[str, int, int]:
+    async def convert_with_streaming(self, pdf_path: str, out_path: str, anonymize_method: str = 'hash', download_images: bool = True) -> Tuple[str, int, int]:
         """
         Convert a PDF to MMD using streaming API
         
+        Args:
+            pdf_path: Path to the PDF file
+            out_path: Path to save the output file
+            anonymize_method: Method to anonymize filename
+            download_images: Whether to download images from Mathpix CDN
+            
         Returns:
             Tuple[str, int, int]: (pdf_id, pages_received, total_pages)
         """
@@ -441,7 +567,23 @@ class PDFConverter:
             logger.info(f"[{pdf_name}] submitted → pdf_id={pdf_id}")
             
             # 2. Stream results and write to file incrementally
-            return await self._handle_streaming(pdf_id, pdf_name, out_path)
+            result = await self._handle_streaming(pdf_id, pdf_name, out_path)
+            
+            # 3. Download images if requested
+            if download_images:
+                logger.info(f"[{pdf_name}] Downloading images from MMD file")
+                if not self.show_progress:
+                    # Show minimal message if not verbose
+                    print(f"Downloading images for {pdf_name}...")
+                
+                # Process the markdown file to download images
+                image_count = process_markdown_images(out_path, download_images)
+                
+                if not self.show_progress and image_count > 0:
+                    # Show minimal success message if not verbose
+                    print(f"✅ Downloaded {image_count} images for {pdf_name}")
+            
+            return result
                     
         except Exception as e:
             logger.error(f"[{pdf_name}] Conversion failed: {e}")
@@ -698,11 +840,12 @@ class PDFConverter:
 class BatchProcessor:
     """Handles batch processing of multiple PDFs"""
     
-    def __init__(self, client: MathpixClient, options: Dict[str, Any], skip_status_check: bool = False, show_progress: bool = True):
+    def __init__(self, client: MathpixClient, options: Dict[str, Any], skip_status_check: bool = False, show_progress: bool = True, download_images: bool = True):
         self.client = client
         self.options = options
         self.skip_status_check = skip_status_check
         self.show_progress = show_progress
+        self.download_images = download_images
         self.converter = PDFConverter(client, options, show_progress)
         
     async def count_total_pages(self, pdfs: List[str]) -> int:
@@ -776,7 +919,12 @@ class BatchProcessor:
                         print(f"\nProcessing {i+1}/{len(pdfs)}: {os.path.basename(pdf)}")
                     logger.info(f"Processing PDF {i+1}/{len(pdfs)}: {os.path.basename(pdf)}")
                     
-                    result = await self.converter.convert_with_streaming(pdf, out_file, anonymize_method)
+                    result = await self.converter.convert_with_streaming(
+                        pdf, 
+                        out_file, 
+                        anonymize_method, 
+                        self.download_images
+                    )
                     
                     if isinstance(result, tuple) and len(result) == 3:
                         pdf_id, pages_received, total_pages_in_pdf = result
@@ -892,6 +1040,10 @@ def parse_args():
                    help="Path to save the downloaded document")
     p.add_argument("--skip-existence-check", action="store_true",
                    help="Skip existence check for documents in list (default: False)")
+    p.add_argument("--no-images", action="store_true",
+                   help="Don't download images from Mathpix CDN (default: False)")
+    p.add_argument("--download-images", action="store_true",
+                   help="Force download images for existing MMD files")
     return p.parse_args()
 
 def get_pdf_list(path):
@@ -925,6 +1077,46 @@ async def async_main():
     # Create Mathpix client
     client = MathpixClient(APP_ID, APP_KEY)
     logger.debug(f"Using app_id: {APP_ID}")
+    
+    # Handle download images for existing files
+    if args.download_images:
+        if not args.input:
+            print("Error: The 'input' argument is required when using --download-images.")
+            print("Specify a .mmd file or a directory containing .mmd files.")
+            return
+            
+        # Process file or directory
+        if os.path.isfile(args.input) and args.input.lower().endswith(('.mmd', '.md')):
+            print(f"Processing images in {args.input}...")
+            image_count = process_markdown_images(args.input, True)
+            print(f"✅ Downloaded {image_count} images from {args.input}")
+            return
+        elif os.path.isdir(args.input):
+            # Find all markdown files in directory
+            mmd_files = []
+            for root, _, files in os.walk(args.input):
+                for file in files:
+                    if file.lower().endswith(('.mmd', '.md')):
+                        mmd_files.append(os.path.join(root, file))
+            
+            if not mmd_files:
+                print(f"No .mmd or .md files found in {args.input}")
+                return
+                
+            print(f"Found {len(mmd_files)} markdown files to process")
+            
+            total_images = 0
+            for mmd_file in mmd_files:
+                print(f"Processing images in {os.path.basename(mmd_file)}...")
+                image_count = process_markdown_images(mmd_file, True)
+                total_images += image_count
+                print(f"  → Downloaded {image_count} images")
+                
+            print(f"\n✅ Downloaded {total_images} images from {len(mmd_files)} files")
+            return
+        else:
+            print(f"Error: {args.input} is not a markdown file or directory")
+            return
     
     # you can tweak these options as needed
     options = {
@@ -1084,7 +1276,8 @@ async def async_main():
         client, 
         options, 
         args.skip_status_check, 
-        not args.silent
+        not args.silent,
+        not args.no_images  # Download images by default unless --no-images is specified
     )
     
     await batch_processor.process_all(pdfs, out_dir, args.anonymize)
