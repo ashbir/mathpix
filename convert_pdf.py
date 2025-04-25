@@ -8,12 +8,48 @@ import traceback
 import logging
 import time
 import sys
+import hashlib
+import uuid
 from dotenv import load_dotenv
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional, Any, Union
 
 # Configure a null handler by default
 logging.getLogger().addHandler(logging.NullHandler())
+
+def anonymize_filename(original_path: str, anonymize_method: str = 'hash') -> str:
+    """Generate an anonymized filename for PDFs sent to Mathpix
+    
+    Args:
+        original_path: The original file path
+        anonymize_method: Method to use for anonymization ('hash', 'uuid', or 'simple')
+    
+    Returns:
+        An anonymized filename with the .pdf extension preserved
+    """
+    # Extract the extension
+    _, ext = os.path.splitext(original_path)
+    
+    # Generate anonymized name based on selected method
+    if anonymize_method == 'uuid':
+        # Use UUID to generate a random unique identifier
+        anonymized_name = f"doc_{str(uuid.uuid4())[:8]}{ext}"
+    elif anonymize_method == 'hash':
+        # Generate a hash from the original filename
+        filename = os.path.basename(original_path)
+        hash_obj = hashlib.md5(filename.encode())
+        anonymized_name = f"doc_{hash_obj.hexdigest()[:8]}{ext}"
+    elif anonymize_method == 'simple':
+        # Just use a simple numbered format
+        timestamp = int(time.time())
+        anonymized_name = f"document_{timestamp}{ext}"
+    else:
+        # Default fallback to hash
+        filename = os.path.basename(original_path)
+        hash_obj = hashlib.md5(filename.encode())
+        anonymized_name = f"doc_{hash_obj.hexdigest()[:8]}{ext}"
+        
+    return anonymized_name
 
 class ConditionalLogger:
     """Custom logger that respects verbose flag"""
@@ -81,15 +117,33 @@ class MathpixClient:
         self.headers = {"app_id": app_id, "app_key": app_key}
         self.default_timeout = 120.0  # seconds
         
-    async def submit_pdf(self, pdf_path: str, options: Dict[str, Any]) -> Dict[str, Any]:
-        """Submit a PDF file to the Mathpix API and return the response"""
+    async def submit_pdf(self, pdf_path: str, options: Dict[str, Any], anonymize_method: str = 'hash') -> Dict[str, Any]:
+        """Submit a PDF file to the Mathpix API and return the response
+        
+        Args:
+            pdf_path: Path to the PDF file
+            options: Dictionary of options for Mathpix
+            anonymize_method: Method to anonymize filename ('hash', 'uuid', 'simple', or 'none')
+        
+        Returns:
+            Dictionary containing the Mathpix API response
+        """
         pdf_name = os.path.basename(pdf_path)
         logger.info(f"[{pdf_name}] Submitting PDF...")
         logger.debug(f"[{pdf_name}] POST request with options: {options}")
         
         async with httpx.AsyncClient(timeout=self.default_timeout) as client:
             with open(pdf_path, "rb") as f:
-                files = {"file": f}
+                # Determine if we should anonymize
+                if anonymize_method and anonymize_method.lower() != 'none':
+                    # Anonymize the filename
+                    anonymized_name = anonymize_filename(pdf_path, anonymize_method)
+                    logger.info(f"[{pdf_name}] Using anonymized filename: {anonymized_name}")
+                    files = {"file": (anonymized_name, f, "application/pdf")}
+                else:
+                    # Use original filename
+                    files = {"file": f}
+                
                 data = {"options_json": json.dumps(options)}
                 
                 resp = await client.post(
@@ -235,7 +289,7 @@ class PDFConverter:
         self.options = options or {}
         self.show_progress = show_progress
         
-    async def convert_with_streaming(self, pdf_path: str, out_path: str) -> Tuple[str, int, int]:
+    async def convert_with_streaming(self, pdf_path: str, out_path: str, anonymize_method: str = 'hash') -> Tuple[str, int, int]:
         """
         Convert a PDF to MMD using streaming API
         
@@ -249,7 +303,7 @@ class PDFConverter:
         
         try:
             # 1. Submit PDF
-            response = await self.client.submit_pdf(pdf_path, options)
+            response = await self.client.submit_pdf(pdf_path, options, anonymize_method)
             pdf_id = response["pdf_id"]
             logger.info(f"[{pdf_name}] submitted → pdf_id={pdf_id}")
             
@@ -559,7 +613,7 @@ class BatchProcessor:
             
         return total_pages
         
-    async def process_all(self, pdfs: List[str], out_dir: str) -> List[Dict[str, Any]]:
+    async def process_all(self, pdfs: List[str], out_dir: str, anonymize_method: str = 'hash') -> List[Dict[str, Any]]:
         """Process a batch of PDFs with a page-based progress bar"""
         results = []
         total_pages = 0
@@ -589,7 +643,7 @@ class BatchProcessor:
                         print(f"\nProcessing {i+1}/{len(pdfs)}: {os.path.basename(pdf)}")
                     logger.info(f"Processing PDF {i+1}/{len(pdfs)}: {os.path.basename(pdf)}")
                     
-                    result = await self.converter.convert_with_streaming(pdf, out_file)
+                    result = await self.converter.convert_with_streaming(pdf, out_file, anonymize_method)
                     
                     if isinstance(result, tuple) and len(result) == 3:
                         pdf_id, pages_received, total_pages_in_pdf = result
@@ -682,6 +736,8 @@ def parse_args():
                    help="Skip final status check (use when all pages are received via streaming)")
     p.add_argument("--silent", action="store_true",
                    help="Hide progress bars (only show log messages)")
+    p.add_argument("--anonymize", choices=["hash", "uuid", "simple", "none"], default="hash",
+                   help="Method to anonymize filenames when sending to Mathpix (default: hash)")
     p.add_argument("--list-documents", action="store_true",
                    help="List all documents previously processed by the Mathpix API")
     p.add_argument("--delete-document", 
@@ -831,7 +887,7 @@ async def async_main():
         not args.silent
     )
     
-    await batch_processor.process_all(pdfs, out_dir)
+    await batch_processor.process_all(pdfs, out_dir, args.anonymize)
     
 def main():
     try:
