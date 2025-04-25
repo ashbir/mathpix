@@ -21,7 +21,13 @@ A Python command-line tool for batch-converting PDFs to Mathpix Markdown using t
 2. Install dependencies:
 
 ```bash
-pip install httpx tqdm python-dotenv
+pip install -r requirements.txt
+```
+
+Alternatively, you can install the required packages manually:
+
+```bash
+pip install httpx tqdm python-dotenv requests beautifulsoup4
 ```
 
 3. Create a `.env` file in the project directory with your Mathpix credentials:
