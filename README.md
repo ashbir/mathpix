@@ -8,7 +8,7 @@ A Python command-line tool for batch-converting PDFs to Mathpix Markdown using t
 - **Batch Processing**: Process entire directories of PDFs in one command
 - **Streaming Support**: Stream conversion results in real-time for faster output
 - **Filename Anonymization**: Protect your privacy by anonymizing filenames sent to Mathpix
-- **Document Management**: List and delete documents stored on the Mathpix server
+- **Document Management**: List, download, and delete documents stored on the Mathpix server
 
 ## Requirements
 
@@ -95,6 +95,35 @@ Filter documents by date:
 
 ```bash
 python convert_pdf.py --list-documents --from-date 2023-01-01 --to-date 2023-12-31
+```
+
+Download a document from the Mathpix server:
+
+```bash
+python convert_pdf.py --download-document YOUR_PDF_ID
+```
+
+Download a document in a specific format:
+
+```bash
+python convert_pdf.py --download-document YOUR_PDF_ID --output-format docx
+```
+
+Available download formats:
+- `mmd` (Mathpix Markdown - default)
+- `md` (Standard Markdown)
+- `docx` (Microsoft Word)
+- `tex.zip` (LaTeX source with images)
+- `pdf` (PDF with HTML rendering)
+- `latex.pdf` (PDF with LaTeX rendering)
+- `html` (HTML format)
+- `lines.json` (Structured line-by-line data)
+- `lines.mmd.json` (Line-by-line MMD data)
+
+Specify an output path for downloaded documents:
+
+```bash
+python convert_pdf.py --download-document YOUR_PDF_ID --output-format docx --output-path ~/Downloads/document.docx
 ```
 
 Delete a document from the Mathpix server:

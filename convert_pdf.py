@@ -353,6 +353,67 @@ class MathpixClient:
             except:
                 return {"success": False, "message": f"Unexpected response from server: {resp.text}"}
 
+    async def download_document(self, pdf_id: str, output_format: str = "mmd", output_path: Optional[str] = None) -> str:
+        """Download a document from the Mathpix server
+        
+        Args:
+            pdf_id: The ID of the PDF document to download
+            output_format: The format to download (mmd, md, docx, tex.zip, html, pdf, latex.pdf, lines.json, lines.mmd.json)
+            output_path: Path to save the file (if None, will create a file in the current directory)
+            
+        Returns:
+            Path to the downloaded file
+        """
+        logger.info(f"Downloading document with ID: {pdf_id} in format: {output_format}")
+        
+        # Check if the document exists and is completed
+        try:
+            status_data = await self.get_pdf_status(pdf_id, "Document")
+            if status_data.get("status") != "completed":
+                raise RuntimeError(f"Document {pdf_id} is not ready for download (status: {status_data.get('status')})")
+        except Exception as e:
+            raise RuntimeError(f"Failed to check document status: {e}")
+        
+        # Build the URL for the specific format
+        url = f"{self.PDF_ENDPOINT}/{pdf_id}.{output_format}"
+        
+        # Determine file extension based on format
+        if output_format == "tex":
+            file_ext = "tex.zip"
+        elif output_format == "lines.json" or output_format == "lines.mmd.json":
+            file_ext = output_format
+        else:
+            file_ext = output_format
+        
+        # Determine output path
+        if output_path is None:
+            output_path = f"{pdf_id}.{file_ext}"
+        
+        # Download the file
+        logger.info(f"Downloading from {url} to {output_path}")
+        
+        async with httpx.AsyncClient(timeout=300.0) as client:  # Longer timeout for potentially large files
+            resp = await client.get(url, headers=self.headers)
+            
+            logger.debug(f"HTTP Request: GET {url} \"{resp.status_code} {resp.reason_phrase}\"")
+            
+            if resp.status_code != 200:
+                raise RuntimeError(f"Failed to download document: HTTP {resp.status_code} - {resp.text}")
+            
+            # Binary formats need to be written in binary mode
+            binary_formats = ["docx", "tex", "tex.zip", "pdf", "latex.pdf"]
+            write_mode = "wb" if output_format in binary_formats else "w"
+            
+            # Write the response content to the output file
+            with open(output_path, write_mode) as f:
+                if write_mode == "wb":
+                    f.write(resp.content)
+                else:
+                    f.write(resp.text)
+            
+            logger.info(f"Document downloaded successfully to {output_path}")
+            return output_path
+
 class PDFConverter:
     """Handles the conversion of PDFs to Mathpix Markdown"""
     
@@ -823,6 +884,12 @@ def parse_args():
                    help="Filter documents from this date (format: YYYY-MM-DD)")
     p.add_argument("--to-date", 
                    help="Filter documents to this date (format: YYYY-MM-DD)")
+    p.add_argument("--download-document", 
+                   help="Download a document from the Mathpix server using its PDF ID")
+    p.add_argument("--output-format", 
+                   help="Format to download the document (default: mmd)", default="mmd")
+    p.add_argument("--output-path", 
+                   help="Path to save the downloaded document")
     return p.parse_args()
 
 def get_pdf_list(path):
@@ -903,7 +970,7 @@ async def async_main():
                     
                     print(f"{pdf_id:<36} {filename:<30} {status:<12} {created_at:<24} {pages:<10}")
                 
-                print("\nTo download or convert any of these documents, use the PDF ID with the Mathpix API directly.")
+                print("\nTo download or convert any of these documents, use --download-document with the PDF ID.")
                 
                 # Show pagination info if relevant
                 if len(pdfs) == args.per_page:
@@ -945,9 +1012,25 @@ async def async_main():
         print(f"Anonymized filename for {file_path}: {anonymized_name}")
         return
     
-    # Validate input parameter is provided when not listing or deleting documents
+    # Handle download document option
+    if args.download_document:
+        pdf_id = args.download_document
+        output_format = args.output_format
+        output_path = args.output_path
+        
+        print(f"\nDownloading document with ID: {pdf_id} in format: {output_format}...")
+        
+        try:
+            output_path = await client.download_document(pdf_id, output_format, output_path)
+            print(f"✅ Document downloaded successfully to {output_path}")
+            return
+        except Exception as e:
+            print(f"❌ Error downloading document: {e}")
+            return
+    
+    # Validate input parameter is provided when not performing specific operations
     if not args.input:
-        print("Error: The 'input' argument is required when not using --list-documents or --delete-document.")
+        print("Error: The 'input' argument is required when not using --list-documents, --delete-document, or --download-document.")
         print("Use --help for more information.")
         return
     
