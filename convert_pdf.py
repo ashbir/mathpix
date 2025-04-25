@@ -51,6 +51,21 @@ def anonymize_filename(original_path: str, anonymize_method: str = 'hash') -> st
         
     return anonymized_name
 
+def get_anonymized_filename(file_path: str, method: str = 'hash') -> str:
+    """Compute and return the anonymized filename for a file without actually renaming it.
+    
+    This function is useful to check what the hash name would be for a given PDF file,
+    helping track which file corresponds to which file on the Mathpix server.
+    
+    Args:
+        file_path: Path to the file
+        method: Anonymization method ('hash', 'uuid', or 'simple')
+        
+    Returns:
+        The anonymized filename that would be used when uploading to Mathpix
+    """
+    return anonymize_filename(file_path, method)
+
 class ConditionalLogger:
     """Custom logger that respects verbose flag"""
     def __init__(self, name, verbose=False):
@@ -738,6 +753,7 @@ def parse_args():
                    help="Hide progress bars (only show log messages)")
     p.add_argument("--anonymize", choices=["hash", "uuid", "simple", "none"], default="hash",
                    help="Method to anonymize filenames when sending to Mathpix (default: hash)")
+    p.add_argument("--check-hash", help="Check what the anonymized filename would be for a given PDF file")
     p.add_argument("--list-documents", action="store_true",
                    help="List all documents previously processed by the Mathpix API")
     p.add_argument("--delete-document", 
@@ -860,6 +876,17 @@ async def async_main():
         except Exception as e:
             print(f"❌ Error deleting document: {e}")
             return
+    
+    # Handle check hash option
+    if args.check_hash:
+        file_path = args.check_hash
+        if not os.path.isfile(file_path):
+            print(f"Error: File not found at {file_path}")
+            return
+        
+        anonymized_name = get_anonymized_filename(file_path, args.anonymize)
+        print(f"Anonymized filename for {file_path}: {anonymized_name}")
+        return
     
     # Validate input parameter is provided when not listing or deleting documents
     if not args.input:
