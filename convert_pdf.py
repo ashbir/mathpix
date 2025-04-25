@@ -75,6 +75,7 @@ class MathpixClient:
     
     BASE_URL = "https://api.mathpix.com/v3"
     PDF_ENDPOINT = f"{BASE_URL}/pdf"
+    PDF_RESULTS_ENDPOINT = f"{BASE_URL}/pdf-results"
     
     def __init__(self, app_id: str, app_key: str):
         self.headers = {"app_id": app_id, "app_key": app_key}
@@ -155,6 +156,42 @@ class MathpixClient:
         resp._client = client
         
         return resp
+    
+    async def list_documents(self, per_page: int = 100, page: int = 1, from_date: Optional[str] = None, to_date: Optional[str] = None) -> Dict[str, Any]:
+        """List all documents stored on the Mathpix server
+        
+        Args:
+            per_page: Number of results to return per page
+            page: Page number to retrieve
+            from_date: Optional ISO format start date (e.g., "2023-01-01T00:00:00.000Z")
+            to_date: Optional ISO format end date
+            
+        Returns:
+            Dictionary containing the list of documents
+        """
+        logger.info(f"Retrieving document list (page {page}, {per_page} per page)")
+        
+        params = {
+            "per_page": per_page,
+            "page": page
+        }
+        
+        if from_date:
+            params["from_date"] = from_date
+        
+        if to_date:
+            params["to_date"] = to_date
+        
+        async with httpx.AsyncClient(timeout=self.default_timeout) as client:
+            resp = await client.get(
+                self.PDF_RESULTS_ENDPOINT,
+                headers=self.headers,
+                params=params
+            )
+            
+            logger.debug(f"HTTP Request: GET {self.PDF_RESULTS_ENDPOINT} \"{resp.status_code} {resp.reason_phrase}\"")
+            resp.raise_for_status()
+            return resp.json()
 
 class PDFConverter:
     """Handles the conversion of PDFs to Mathpix Markdown"""
@@ -602,7 +639,7 @@ class BatchProcessor:
 def parse_args():
     p = argparse.ArgumentParser(
         description="Batch‑convert a folder of PDFs to Mathpix‑Markdown using streaming")
-    p.add_argument("input", help="Path to PDF file or directory of PDFs")
+    p.add_argument("input", help="Path to PDF file or directory of PDFs", nargs='?')
     p.add_argument("-o", "--out-dir",
                    help="Directory to write .mmd files (default: same as PDF folder)")
     p.add_argument("-v", "--verbose", action="store_true", 
@@ -611,6 +648,16 @@ def parse_args():
                    help="Skip final status check (use when all pages are received via streaming)")
     p.add_argument("--silent", action="store_true",
                    help="Hide progress bars (only show log messages)")
+    p.add_argument("--list-documents", action="store_true",
+                   help="List all documents previously processed by the Mathpix API")
+    p.add_argument("--page", type=int, default=1,
+                   help="Page number for listing documents (default: 1)")
+    p.add_argument("--per-page", type=int, default=50,
+                   help="Number of documents per page (default: 50)")
+    p.add_argument("--from-date", 
+                   help="Filter documents from this date (format: YYYY-MM-DD)")
+    p.add_argument("--to-date", 
+                   help="Filter documents to this date (format: YYYY-MM-DD)")
     return p.parse_args()
 
 def get_pdf_list(path):
@@ -651,6 +698,64 @@ async def async_main():
         "rm_spaces": True,
         "include_equation_tags": True,
     }
+    
+    # Handle list documents option
+    if args.list_documents:
+        # Convert date format for API if provided
+        from_date = None
+        if args.from_date:
+            from_date = f"{args.from_date}T00:00:00.000Z"
+            
+        to_date = None
+        if args.to_date:
+            to_date = f"{args.to_date}T23:59:59.999Z"
+            
+        print(f"\nRetrieving documents from Mathpix server (page {args.page}, {args.per_page} per page)...")
+        
+        try:
+            documents = await client.list_documents(
+                per_page=args.per_page,
+                page=args.page,
+                from_date=from_date,
+                to_date=to_date
+            )
+            
+            if "pdfs" in documents and documents["pdfs"]:
+                pdfs = documents["pdfs"]
+                print(f"\nFound {len(pdfs)} document(s):\n")
+                
+                # Display header
+                print(f"{'ID':<36} {'File':<30} {'Status':<12} {'Created':<24} {'Pages':<10}")
+                print("-" * 110)
+                
+                # Display each document
+                for pdf in pdfs:
+                    pdf_id = pdf.get("id", "N/A")
+                    filename = os.path.basename(pdf.get("input_file", "Unknown"))
+                    status = pdf.get("status", "Unknown")
+                    created_at = pdf.get("created_at", "Unknown")
+                    pages = f"{pdf.get('num_pages_completed', 0)}/{pdf.get('num_pages', 0)}"
+                    
+                    print(f"{pdf_id:<36} {filename:<30} {status:<12} {created_at:<24} {pages:<10}")
+                
+                print("\nTo download or convert any of these documents, use the PDF ID with the Mathpix API directly.")
+                
+                # Show pagination info if relevant
+                if len(pdfs) == args.per_page:
+                    print(f"\nShowing page {args.page}. For more results, use --page {args.page + 1}")
+            else:
+                print("No documents found.")
+            
+            return
+        except Exception as e:
+            print(f"Error retrieving documents: {e}")
+            return
+    
+    # Validate input parameter is provided when not listing documents
+    if not args.input:
+        print("Error: The 'input' argument is required when not using --list-documents.")
+        print("Use --help for more information.")
+        return
     
     pdfs = get_pdf_list(args.input)
     if not pdfs:
