@@ -579,6 +579,27 @@ class PDFConverter:
                 # Process the markdown file to download images
                 image_count = process_markdown_images(out_path, download_images)
                 
+                # Also process any conversion formats specified in options
+                if "conversion_formats" in self.options and self.options["conversion_formats"]:
+                    conversion_formats = self.options["conversion_formats"]
+                    for format_key, enabled in conversion_formats.items():
+                        if not enabled:
+                            continue
+                        
+                        # Get the format extension (.md, .docx, etc.)
+                        format_ext = format_key
+                        
+                        # Process images for any markdown-based formats
+                        if format_ext in ["md"]:
+                            format_path = os.path.splitext(out_path)[0] + f".{format_ext}"
+                            # Wait for the conversion to complete
+                            await self._wait_for_format_completion(pdf_id, format_ext)
+                            
+                            # If the file exists, process images
+                            if os.path.exists(format_path):
+                                logger.info(f"[{pdf_name}] Processing images in {format_ext} output")
+                                process_markdown_images(format_path, download_images)
+                
                 if not self.show_progress and image_count > 0:
                     # Show minimal success message if not verbose
                     print(f"✅ Downloaded {image_count} images for {pdf_name}")
@@ -595,6 +616,51 @@ class PDFConverter:
                 return await self.fallback_download(pdf_id, pdf_name, out_path)
             else:
                 raise
+                
+    async def _wait_for_format_completion(self, pdf_id: str, format_ext: str, max_wait_time: int = 60) -> bool:
+        """Wait for a specific format conversion to complete
+        
+        Args:
+            pdf_id: PDF ID
+            format_ext: Format extension (md, docx, etc.)
+            max_wait_time: Maximum wait time in seconds
+            
+        Returns:
+            bool: True if format completed, False if timed out
+        """
+        start_time = time.time()
+        
+        while True:
+            try:
+                # Check conversion status
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.get(
+                        f"{MathpixClient.BASE_URL}/converter/{pdf_id}",
+                        headers=self.client.headers
+                    )
+                    resp.raise_for_status()
+                    
+                    status_data = resp.json()
+                    if "conversion_status" in status_data:
+                        format_status = status_data["conversion_status"].get(format_ext, {}).get("status")
+                        if format_status == "completed":
+                            logger.info(f"Format {format_ext} completed for {pdf_id}")
+                            return True
+                        elif format_status == "error":
+                            error_info = status_data["conversion_status"][format_ext].get("error_info", {})
+                            logger.error(f"Format {format_ext} failed for {pdf_id}: {error_info}")
+                            return False
+            except Exception as e:
+                logger.warning(f"Error checking format status: {e}")
+            
+            # Check timeout
+            elapsed = time.time() - start_time
+            if elapsed > max_wait_time:
+                logger.warning(f"Timeout waiting for {format_ext} format completion after {elapsed:.1f}s")
+                return False
+            
+            # Wait before checking again
+            await asyncio.sleep(5)
     
     async def _handle_streaming(self, pdf_id: str, pdf_name: str, out_path: str) -> Tuple[str, int, int]:
         """Handle the streaming part of the conversion"""
