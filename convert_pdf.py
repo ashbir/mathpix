@@ -890,6 +890,8 @@ def parse_args():
                    help="Format to download the document (default: mmd)", default="mmd")
     p.add_argument("--output-path", 
                    help="Path to save the downloaded document")
+    p.add_argument("--skip-existence-check", action="store_true",
+                   help="Skip existence check for documents in list (default: False)")
     return p.parse_args()
 
 def get_pdf_list(path):
@@ -954,11 +956,39 @@ async def async_main():
             
             if "pdfs" in documents and documents["pdfs"]:
                 pdfs = documents["pdfs"]
+                
+                # Check if the documents still exist
+                if not args.skip_existence_check:
+                    print(f"Checking document existence status (this might take a moment)...")
+                    existence_progress = None
+                    
+                    # Create progress bar if not in silent mode
+                    if not args.silent:
+                        existence_progress = tqdm(
+                            total=len(pdfs),
+                            desc="Checking document existence",
+                            unit="doc",
+                            position=0,
+                            leave=True
+                        )
+                    
+                    for pdf in pdfs:
+                        pdf_id = pdf.get("id", "N/A")
+                        # Check if the document still exists
+                        exists = await client.document_exists(pdf_id)
+                        pdf["exists"] = exists
+                        
+                        if existence_progress:
+                            existence_progress.update(1)
+                    
+                    if existence_progress:
+                        existence_progress.close()
+                
                 print(f"\nFound {len(pdfs)} document(s):\n")
                 
                 # Display header
-                print(f"{'ID':<36} {'File':<30} {'Status':<12} {'Created':<24} {'Pages':<10}")
-                print("-" * 110)
+                print(f"{'ID':<36} {'File':<30} {'Status':<12} {'Created':<24} {'Pages':<10} {'Exists':<6}")
+                print("-" * 120)
                 
                 # Display each document
                 for pdf in pdfs:
@@ -968,7 +998,10 @@ async def async_main():
                     created_at = pdf.get("created_at", "Unknown")
                     pages = f"{pdf.get('num_pages_completed', 0)}/{pdf.get('num_pages', 0)}"
                     
-                    print(f"{pdf_id:<36} {filename:<30} {status:<12} {created_at:<24} {pages:<10}")
+                    # Add existence status if available
+                    exists_status = "Yes" if pdf.get("exists", True) else "No"
+                    
+                    print(f"{pdf_id:<36} {filename:<30} {status:<12} {created_at:<24} {pages:<10} {exists_status:<6}")
                 
                 print("\nTo download or convert any of these documents, use --download-document with the PDF ID.")
                 
