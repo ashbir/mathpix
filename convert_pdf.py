@@ -261,7 +261,31 @@ class MathpixClient:
             logger.debug(f"HTTP Request: GET {self.PDF_RESULTS_ENDPOINT} \"{resp.status_code} {resp.reason_phrase}\"")
             resp.raise_for_status()
             return resp.json()
-    
+
+    async def document_exists(self, pdf_id: str) -> bool:
+        """Check if a document with the given ID exists on the Mathpix server
+        
+        Args:
+            pdf_id: The ID of the PDF document to check
+            
+        Returns:
+            Boolean indicating if the document exists
+        """
+        logger.info(f"Checking if document exists with ID: {pdf_id}")
+        
+        url = f"{self.PDF_ENDPOINT}/{pdf_id}"
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                url,
+                headers=self.headers
+            )
+            
+            logger.debug(f"HTTP Request: GET {url} \"{resp.status_code} {resp.reason_phrase}\"")
+            
+            # Document exists if the status code is 200 OK
+            return resp.status_code == 200
+            
     async def delete_document(self, pdf_id: str) -> Dict[str, Any]:
         """Delete a document from the Mathpix server
         
@@ -273,6 +297,12 @@ class MathpixClient:
         """
         logger.info(f"Deleting document with ID: {pdf_id}")
         
+        # First, check if the document exists
+        document_exists = await self.document_exists(pdf_id)
+        if not document_exists:
+            logger.warning(f"Document with ID {pdf_id} not found")
+            return {"success": False, "message": f"Document {pdf_id} not found on the Mathpix server"}
+        
         url = f"{self.PDF_ENDPOINT}/{pdf_id}"
         
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -283,12 +313,39 @@ class MathpixClient:
             
             logger.debug(f"HTTP Request: DELETE {url} \"{resp.status_code} {resp.reason_phrase}\"")
             
+            # Check if the response body contains error information
+            try:
+                response_data = resp.json() if resp.content else {}
+                if 'error' in response_data:
+                    return {"success": False, "message": f"Server error: {response_data.get('error')}"}
+            except:
+                # Not JSON or parsing error
+                pass
+            
             # The Mathpix API returns 204 No Content for successful deletion
             # but may also return 200 OK in some cases
             if resp.status_code == 204 or resp.status_code == 200:
+                # Additional check to verify the document was actually found and deleted
+                # If we get a 200 OK but something went wrong, the response might have additional details
+                if resp.content and len(resp.content) > 0:
+                    try:
+                        data = resp.json()
+                        if data.get("status") == "error" or "error" in data:
+                            error_msg = data.get("error", "Unknown error")
+                            return {"success": False, "message": error_msg}
+                    except:
+                        # If we can't parse the response, assume it worked
+                        pass
+                
                 return {"success": True, "message": f"Document {pdf_id} deleted successfully"}
+            elif resp.status_code == 404:
+                return {"success": False, "message": f"Document {pdf_id} not found"}
             
-            resp.raise_for_status()
+            # Handle other error status codes
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                return {"success": False, "message": f"HTTP error {e.response.status_code}: {e.response.text}"}
             
             # If the response contains JSON data, return it
             try:
