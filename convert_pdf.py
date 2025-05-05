@@ -106,6 +106,11 @@ def download_mathpix_image(url: str, output_dir: str) -> str:
             base_name = os.path.splitext(filename)[0]
             ext = os.path.splitext(filename)[1]
             new_filename = f"{base_name}_x{query_params['top_left_x']}_y{query_params['top_left_y']}_w{query_params['width']}_h{query_params['height']}{ext}"
+        elif 'height' in query_params:
+            # Special case for lines.json and lines.mmd.json format images from Mathpix
+            base_name = os.path.splitext(filename)[0]
+            ext = os.path.splitext(filename)[1]
+            new_filename = f"{base_name}_h{query_params['height']}{ext}"
         else:
             new_filename = filename
 
@@ -117,11 +122,84 @@ def download_mathpix_image(url: str, output_dir: str) -> str:
         with open(image_path, 'wb') as f:
             f.write(response.content)
         
+        logger.info(f"Downloaded image: {url} -> {image_path}")
         return image_path
         
     except Exception as e:
         logger.error(f"Failed to download {url}: {e}")
         return None
+
+def extract_and_download_mathpix_images(content, output_dir, pattern=None):
+    """
+    Common function to extract and download Mathpix CDN images from content.
+    
+    Args:
+        content: The content to search for image URLs (string for markdown, dict for JSON)
+        output_dir: Directory to save downloaded images
+        pattern: Regular expression pattern to match image URLs (if None, uses default)
+        
+    Returns:
+        list: List of downloaded image paths
+    """
+    # Use default pattern if none provided
+    if pattern is None:
+        pattern = r'https?://cdn\.mathpix\.com/cropped/[^)"\'\\s]+'
+    
+    downloaded_images = []
+    
+    # Handle JSON content
+    if isinstance(content, dict):
+        # Process lines.mmd.json format - has pages with lines that contain text fields
+        if 'pages' in content and isinstance(content['pages'], list):
+            for page in content['pages']:
+                if 'lines' in page and isinstance(page['lines'], list):
+                    for line in page['lines']:
+                        if 'text' in line and isinstance(line['text'], str):
+                            # Extract all Mathpix CDN URLs from the text
+                            urls = re.findall(pattern, line['text'])
+                            for url in urls:
+                                # Clean up URL if it contains escape characters or quotes
+                                cleaned_url = url.strip('"\\\'"')
+                                local_image_path = download_mathpix_image(cleaned_url, output_dir)
+                                if local_image_path:
+                                    downloaded_images.append(local_image_path)
+        
+        # Recursively search for URLs in any field in the JSON
+        def search_json_for_urls(obj):
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if isinstance(value, str):
+                        urls = re.findall(pattern, value)
+                        for url in urls:
+                            cleaned_url = url.strip('"\\\'"')
+                            local_image_path = download_mathpix_image(cleaned_url, output_dir)
+                            if local_image_path:
+                                downloaded_images.append(local_image_path)
+                    else:
+                        search_json_for_urls(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    search_json_for_urls(item)
+        
+        # Search the entire JSON for any URLs we might have missed
+        search_json_for_urls(content)
+    
+    # Handle string content (markdown)
+    elif isinstance(content, str):
+        # For markdown, we use a slightly different pattern that includes alt text
+        md_pattern = r'!\[(.*?)\]\((https?://cdn\.mathpix\.com/cropped/.*?)\)'
+        
+        # Extract all Mathpix CDN URLs from the text
+        matches = re.findall(md_pattern, content)
+        for match in matches:
+            # The URL is the second capture group
+            image_url = match[1]
+            # Download the image
+            local_image_path = download_mathpix_image(image_url, output_dir)
+            if local_image_path:
+                downloaded_images.append(local_image_path)
+    
+    return downloaded_images
 
 # Add function to process a markdown file and download images
 def process_markdown_images(file_path: str, download_images: bool = True):
@@ -149,41 +227,81 @@ def process_markdown_images(file_path: str, download_images: bool = True):
         # Create directory with the same name as the markdown file
         output_dir = os.path.join(os.path.dirname(file_path), file_name_without_ext)
         
-        # Regular expression to find image links
-        image_pattern = r'!\[(.*?)\]\((https?://cdn\.mathpix\.com/cropped/.*?)\)'
+        # Extract and download images using the common function
+        downloaded_images = extract_and_download_mathpix_images(content, output_dir)
         
-        # Count replacements
-        replacement_count = 0
-        
-        def replace_image_link(match):
-            nonlocal replacement_count
-            alt_text = match.group(1)
-            image_url = match.group(2)
+        if downloaded_images:
+            # Now update references in the markdown file
+            image_pattern = r'!\[(.*?)\]\((https?://cdn\.mathpix\.com/cropped/.*?)\)'
+            replacement_count = 0
             
-            # Download the image
-            local_image_path = download_mathpix_image(image_url, output_dir)
+            def replace_image_link(match):
+                nonlocal replacement_count
+                alt_text = match.group(1)
+                image_url = match.group(2)
+                
+                # Find the corresponding local image path
+                local_image_path = None
+                for path in downloaded_images:
+                    if path and os.path.basename(image_url) in path:
+                        local_image_path = path
+                        break
+                
+                if local_image_path:
+                    # Get relative path from markdown file to image
+                    rel_path = os.path.relpath(local_image_path, os.path.dirname(file_path))
+                    replacement_count += 1
+                    return f'![{alt_text}]({rel_path})'
+                else:
+                    # If we couldn't find a matching downloaded image, keep the original link
+                    return match.group(0)
             
-            if local_image_path:
-                # Get relative path from markdown file to image
-                rel_path = os.path.relpath(local_image_path, os.path.dirname(file_path))
-                replacement_count += 1
-                return f'![{alt_text}]({rel_path})'
-            else:
-                # If download failed, keep the original link
-                return match.group(0)
+            # Replace image links in content
+            updated_content = re.sub(image_pattern, replace_image_link, content)
+            
+            # Save updated content back to the file
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(updated_content)
+            
+            logger.info(f"Updated {replacement_count} image links in {file_path}")
         
-        # Replace image links in content
-        updated_content = re.sub(image_pattern, replace_image_link, content)
-        
-        # Save updated content back to the file
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(updated_content)
-        
-        logger.info(f"Updated {replacement_count} image links in {file_path}")
-        return replacement_count
+        return len(downloaded_images)
         
     except Exception as e:
         logger.error(f"Error processing {file_path}: {e}")
+        return 0
+
+def process_json_images(file_path: str) -> int:
+    """
+    Process a JSON file to extract and download images from Mathpix CDN URLs.
+    This handles both lines.json and lines.mmd.json formats from Mathpix.
+    
+    Args:
+        file_path: Path to the JSON file
+        
+    Returns:
+        Number of images processed
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = json.load(f)
+        
+        # Get the filename without extension to use as the image directory name
+        file_basename = os.path.basename(file_path)
+        file_name_without_ext = os.path.splitext(file_basename)[0]
+        if file_name_without_ext.endswith('.lines'):
+            file_name_without_ext = file_name_without_ext[:-6]  # Remove '.lines' suffix
+        
+        # Create directory with the same name as the JSON file
+        output_dir = os.path.join(os.path.dirname(file_path), file_name_without_ext)
+        
+        # Extract and download images using the common function
+        downloaded_images = extract_and_download_mathpix_images(content, output_dir)
+        
+        return len(downloaded_images)
+        
+    except Exception as e:
+        logger.error(f"Error processing JSON file {file_path}: {e}")
         return 0
 
 class ConditionalLogger:
@@ -1148,40 +1266,67 @@ async def async_main():
     if args.download_images:
         if not args.input:
             print("Error: The 'input' argument is required when using --download-images.")
-            print("Specify a .mmd file or a directory containing .mmd files.")
+            print("Specify a .mmd, .md, or .json file, or a directory containing such files.")
             return
             
         # Process file or directory
-        if os.path.isfile(args.input) and args.input.lower().endswith(('.mmd', '.md')):
-            print(f"Processing images in {args.input}...")
-            image_count = process_markdown_images(args.input, True)
-            print(f"✅ Downloaded {image_count} images from {args.input}")
-            return
+        if os.path.isfile(args.input):
+            file_ext = os.path.splitext(args.input)[1].lower()
+            
+            if file_ext in ('.mmd', '.md'):
+                print(f"Processing images in {args.input}...")
+                image_count = process_markdown_images(args.input, True)
+                print(f"✅ Downloaded {image_count} images from {args.input}")
+                return
+            elif file_ext == '.json':
+                # Check if it's a lines.mmd.json or lines.json file
+                if args.input.endswith('.lines.mmd.json') or args.input.endswith('.lines.json'):
+                    print(f"Processing images in {args.input}...")
+                    image_count = process_json_images(args.input)
+                    print(f"✅ Downloaded {image_count} images from {args.input}")
+                    return
+                else:
+                    print(f"Warning: {args.input} is not a recognized Mathpix JSON format (.lines.json or .lines.mmd.json)")
+                    print("Attempting to process anyway...")
+                    image_count = process_json_images(args.input)
+                    print(f"✅ Downloaded {image_count} images from {args.input}")
+                    return
+            else:
+                print(f"Error: {args.input} is not a supported file format.")
+                print("Supported formats are .mmd, .md, .lines.json, and .lines.mmd.json")
+                return
         elif os.path.isdir(args.input):
-            # Find all markdown files in directory
-            mmd_files = []
+            # Find all markdown and JSON files in directory
+            supported_files = []
             for root, _, files in os.walk(args.input):
                 for file in files:
-                    if file.lower().endswith(('.mmd', '.md')):
-                        mmd_files.append(os.path.join(root, file))
+                    if file.lower().endswith(('.mmd', '.md')) or file.lower().endswith(('.lines.json', '.lines.mmd.json')):
+                        supported_files.append(os.path.join(root, file))
             
-            if not mmd_files:
-                print(f"No .mmd or .md files found in {args.input}")
+            if not supported_files:
+                print(f"No supported files found in {args.input}")
                 return
                 
-            print(f"Found {len(mmd_files)} markdown files to process")
+            print(f"Found {len(supported_files)} files to process")
             
             total_images = 0
-            for mmd_file in mmd_files:
-                print(f"Processing images in {os.path.basename(mmd_file)}...")
-                image_count = process_markdown_images(mmd_file, True)
-                total_images += image_count
-                print(f"  → Downloaded {image_count} images")
+            for file_path in supported_files:
+                file_ext = os.path.splitext(file_path)[1].lower()
+                print(f"Processing images in {os.path.basename(file_path)}...")
                 
-            print(f"\n✅ Downloaded {total_images} images from {len(mmd_files)} files")
+                if file_ext in ('.mmd', '.md'):
+                    image_count = process_markdown_images(file_path, True)
+                    total_images += image_count
+                    print(f"  → Downloaded {image_count} images")
+                elif file_ext == '.json':
+                    image_count = process_json_images(file_path)
+                    total_images += image_count
+                    print(f"  → Downloaded {image_count} images")
+                
+            print(f"\n✅ Downloaded {total_images} images from {len(supported_files)} files")
             return
         else:
-            print(f"Error: {args.input} is not a markdown file or directory")
+            print(f"Error: {args.input} is not a file or directory")
             return
     
     # you can tweak these options as needed
