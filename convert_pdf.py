@@ -801,7 +801,19 @@ class MathpixClient:
                 if write_mode == "wb":
                     f.write(resp.content)
                 else:
-                    f.write(resp.text)
+                    # Format JSON output for better readability
+                    if output_format.endswith('.json') or '.json' in output_format:
+                        try:
+                            # Parse the JSON and write it with proper indentation
+                            json_content = json.loads(resp.text)
+                            json.dump(json_content, f, indent=2)
+                            logger.info(f"Formatted JSON content with indentation for better readability")
+                        except json.JSONDecodeError:
+                            # If JSON parsing fails, write the raw text
+                            logger.warning(f"Could not parse JSON content, writing raw text")
+                            f.write(resp.text)
+                    else:
+                        f.write(resp.text)
             
             logger.info(f"Document downloaded successfully to {output_path}")
             return output_path
