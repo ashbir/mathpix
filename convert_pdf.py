@@ -226,46 +226,41 @@ def process_markdown_images(file_path: str, download_images: bool = True):
         
         # Create directory with the same name as the markdown file
         output_dir = os.path.join(os.path.dirname(file_path), file_name_without_ext)
+        os.makedirs(output_dir, exist_ok=True)
         
-        # Extract and download images using the common function
-        downloaded_images = extract_and_download_mathpix_images(content, output_dir)
+        # Pattern to find image references in markdown format: ![alt text](image_url)
+        image_pattern = r'!\[(.*?)\]\((https?://cdn\.mathpix\.com/cropped/.*?)\)'
         
-        if downloaded_images:
-            # Now update references in the markdown file
-            image_pattern = r'!\[(.*?)\]\((https?://cdn\.mathpix\.com/cropped/.*?)\)'
-            replacement_count = 0
+        def download_and_replace(match):
+            alt_text = match.group(1)
+            image_url = match.group(2)
             
-            def replace_image_link(match):
-                nonlocal replacement_count
-                alt_text = match.group(1)
-                image_url = match.group(2)
-                
-                # Find the corresponding local image path
-                local_image_path = None
-                for path in downloaded_images:
-                    if path and os.path.basename(image_url) in path:
-                        local_image_path = path
-                        break
-                
-                if local_image_path:
-                    # Get relative path from markdown file to image
-                    rel_path = os.path.relpath(local_image_path, os.path.dirname(file_path))
-                    replacement_count += 1
-                    return f'![{alt_text}]({rel_path})'
-                else:
-                    # If we couldn't find a matching downloaded image, keep the original link
-                    return match.group(0)
+            # Download the image directly
+            local_image_path = download_mathpix_image(image_url, output_dir)
             
-            # Replace image links in content
-            updated_content = re.sub(image_pattern, replace_image_link, content)
+            if local_image_path:
+                # Get relative path from markdown file to image
+                rel_path = os.path.relpath(local_image_path, os.path.dirname(file_path))
+                return f'![{alt_text}]({rel_path})'
+            else:
+                # If download failed, keep the original link
+                return match.group(0)
+        
+        # Find all matches and count them
+        matches = re.findall(image_pattern, content)
+        image_count = len(matches)
+        
+        if image_count > 0:
+            # Replace all image URLs with local paths and download in a single pass
+            updated_content = re.sub(image_pattern, download_and_replace, content)
             
             # Save updated content back to the file
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(updated_content)
             
-            logger.info(f"Updated {replacement_count} image links in {file_path}")
+            logger.info(f"Updated {image_count} image links in {file_path}")
         
-        return len(downloaded_images)
+        return image_count
         
     except Exception as e:
         logger.error(f"Error processing {file_path}: {e}")
