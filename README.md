@@ -8,6 +8,7 @@ A Python command-line tool for batch-converting PDFs to Mathpix Markdown using t
 - **Batch Processing**: Process entire directories of PDFs in one command
 - **Streaming Support**: Stream conversion results in real-time for faster output
 - **Filename Anonymization**: Protect your privacy by anonymizing filenames sent to Mathpix
+- **Image Handling**: Automatically downloads images from Mathpix CDN referenced in MMD, `lines.json`, and `lines.mmd.json` files, updating links to local paths.
 - **Document Management**: List, download, and delete documents stored on the Mathpix server
 
 ## Requirements
@@ -58,6 +59,8 @@ Specify an output directory:
 ```bash
 python convert_pdf.py /path/to/your.pdf -o /output/directory/
 ```
+
+Note: During conversion to MMD, referenced images are automatically downloaded to a local directory (named after the MMD file, e.g., `your.mmd` images go into `your/` subdirectory) and the links within the MMD are updated to point to these local images. This behavior is typically on by default but might be controllable with a command-line flag (e.g., `--no-download-images` or `--download-images false` if implemented in the CLI).
 
 ### Anonymizing Filenames
 
@@ -123,8 +126,8 @@ Available download formats:
 - `pdf` (PDF with HTML rendering)
 - `latex.pdf` (PDF with LaTeX rendering)
 - `html` (HTML format)
-- `lines.json` (Structured line-by-line data)
-- `lines.mmd.json` (Line-by-line MMD data)
+- `lines.json` (Structured line-by-line data; referenced Mathpix images are downloaded and paths updated to local versions)
+- `lines.mmd.json` (Line-by-line MMD data; referenced Mathpix images are downloaded and paths updated to local versions)
 
 Specify an output path for downloaded documents:
 
@@ -164,9 +167,10 @@ This tool:
 
 1. Uploads PDFs to the Mathpix API
 2. Optionally anonymizes filenames for privacy
-3. Uses streaming to receive results page-by-page in real-time  
+3. Uses streaming to receive results page-by-page in real-time
 4. Writes Mathpix Markdown (.mmd) output files
-5. Can manage documents stored on the Mathpix server
+5. Downloads images referenced in MMD or supported JSON formats (like `lines.json`, `lines.mmd.json`), updates the documents to use local image paths, and stores images in a subdirectory named after the source file.
+6. Can manage documents stored on the Mathpix server
 
 ## Troubleshooting
 
