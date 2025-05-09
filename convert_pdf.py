@@ -701,7 +701,7 @@ class MathpixClient:
         Args:
             pdf_id: The ID of the PDF document to download
             output_format: The format to download (mmd, md, docx, tex.zip, html, pdf, latex.pdf, lines.json, lines.mmd.json)
-            output_path: Path to save the file (if None, will create a file in the current directory)
+            output_path: Path to save the file (if None, will create a file using the original filename from server)
             
         Returns:
             Path to the downloaded file
@@ -726,13 +726,28 @@ class MathpixClient:
             file_ext = output_format
         else:
             file_ext = output_format
+            
+        # Try to find original filename from document listing if not provided in status data
+        original_filename = None
+        original_input_file = status_data.get("input_file", "")
         
-        # Determine output path
-        if output_path is None:
-            output_path = f"{pdf_id}.{file_ext}"
+        if not original_input_file or original_input_file == "Unknown":
+            # Try to get document details from the document list
+            try:
+                logger.info(f"Looking up additional document information for {pdf_id}...")
+                docs = await self.list_documents(per_page=100, page=1)
+                
+                if "pdfs" in docs and docs["pdfs"]:
+                    for pdf in docs["pdfs"]:
+                        if pdf.get("id") == pdf_id:
+                            original_input_file = pdf.get("input_file", "")
+                            logger.info(f"Found original file information: {original_input_file}")
+                            break
+            except Exception as e:
+                logger.warning(f"Could not retrieve document list to find original filename: {e}")
         
         # Download the file
-        logger.info(f"Downloading from {url} to {output_path}")
+        logger.info(f"Downloading from {url}")
         
         async with httpx.AsyncClient(timeout=300.0) as client:  # Longer timeout for potentially large files
             resp = await client.get(url, headers=self.headers)
@@ -745,6 +760,41 @@ class MathpixClient:
             # Binary formats need to be written in binary mode
             binary_formats = ["docx", "tex", "tex.zip", "pdf", "latex.pdf"]
             write_mode = "wb" if output_format in binary_formats else "w"
+            
+            # Get the original filename from the server if available in Content-Disposition header
+            if 'Content-Disposition' in resp.headers:
+                content_disp = resp.headers['Content-Disposition']
+                # Look for filename="something.ext" or filename=something.ext in the header
+                match = re.search(r'filename=["\']?([^"\';\n]+)', content_disp)
+                if match:
+                    content_disp_filename = match.group(1)
+                    # Only use this if it's not just the PDF ID
+                    if pdf_id not in content_disp_filename:
+                        original_filename = content_disp_filename
+                        logger.info(f"Found original filename in headers: {original_filename}")
+                    else:
+                        logger.info(f"Header filename {content_disp_filename} appears to be PDF ID, not using it")
+            
+            # If no filename from headers, try to extract from input_file field
+            if not original_filename and original_input_file:
+                # Extract just the filename part if it's a path or URL
+                base_filename = os.path.basename(original_input_file)
+                
+                # If we found a base filename, use it
+                if base_filename:
+                    # Remove any existing extension and add the correct extension for the format
+                    original_filename = os.path.splitext(base_filename)[0] + f".{file_ext}"
+                    logger.info(f"Using filename from document information: {original_filename}")
+            
+            # Determine output path
+            if output_path is None:
+                if original_filename:
+                    output_path = original_filename
+                else:
+                    output_path = f"{pdf_id}.{file_ext}"
+                    logger.info(f"No original filename found, using PDF ID: {output_path}")
+            
+            logger.info(f"Saving to {output_path}")
             
             # Write the response content to the output file
             with open(output_path, write_mode) as f:
