@@ -289,9 +289,118 @@ def process_json_images(file_path: str) -> int:
         
         # Create directory with the same name as the JSON file
         output_dir = os.path.join(os.path.dirname(file_path), file_name_without_ext)
+        os.makedirs(output_dir, exist_ok=True)
         
-        # Extract and download images using the common function
-        downloaded_images = extract_and_download_mathpix_images(content, output_dir)
+        # Regular expression pattern to find Mathpix CDN image URLs
+        pattern = r'(https?://cdn\.mathpix\.com/cropped/[^)"\'\\s]+)'
+        # Pattern to find image references in markdown format within JSON strings
+        md_pattern = r'!\[(.*?)\]\((https?://cdn\.mathpix\.com/cropped/.*?)\)'
+        
+        # Track all downloaded images and their mappings
+        downloaded_images = {}  # Original URL -> local path
+        replacement_count = 0
+        
+        # Process the content based on its structure
+        if isinstance(content, dict) and 'pages' in content:
+            # For both lines.json and lines.mmd.json formats
+            for page in content['pages']:
+                if 'lines' in page and isinstance(page['lines'], list):
+                    for line in page['lines']:
+                        # Process 'text' field which can contain markdown image syntax
+                        if 'text' in line and isinstance(line['text'], str):
+                            # Find all markdown image patterns
+                            matches = re.findall(md_pattern, line['text'])
+                            for match in matches:
+                                alt_text = match[0]
+                                image_url = match[1]
+                                
+                                # Download the image if not already downloaded
+                                if image_url not in downloaded_images:
+                                    local_path = download_mathpix_image(image_url, output_dir)
+                                    if local_path:
+                                        downloaded_images[image_url] = local_path
+                                
+                                # Replace URL with local path
+                                if image_url in downloaded_images:
+                                    local_path = downloaded_images[image_url]
+                                    rel_path = os.path.relpath(local_path, os.path.dirname(file_path))
+                                    line['text'] = line['text'].replace(
+                                        f'![{alt_text}]({image_url})', 
+                                        f'![{alt_text}]({rel_path})'
+                                    )
+                                    replacement_count += 1
+                            
+                            # Also find and replace any raw URLs (not in markdown syntax)
+                            raw_urls = re.findall(pattern, line['text'])
+                            for url in raw_urls:
+                                # Skip URLs already handled by markdown pattern
+                                if any(url == match[1] for match in matches):
+                                    continue
+                                
+                                # Download the image if not already downloaded
+                                if url not in downloaded_images:
+                                    local_path = download_mathpix_image(url, output_dir)
+                                    if local_path:
+                                        downloaded_images[url] = local_path
+                                
+                                # Replace URL with local path
+                                if url in downloaded_images:
+                                    local_path = downloaded_images[url]
+                                    rel_path = os.path.relpath(local_path, os.path.dirname(file_path))
+                                    line['text'] = line['text'].replace(url, rel_path)
+                                    replacement_count += 1
+                        
+                        # For lines.json format, also check 'text_display' field
+                        if 'text_display' in line and isinstance(line['text_display'], str):
+                            # Find all markdown image patterns
+                            matches = re.findall(md_pattern, line['text_display'])
+                            for match in matches:
+                                alt_text = match[0]
+                                image_url = match[1]
+                                
+                                # Download the image if not already downloaded
+                                if image_url not in downloaded_images:
+                                    local_path = download_mathpix_image(image_url, output_dir)
+                                    if local_path:
+                                        downloaded_images[image_url] = local_path
+                                
+                                # Replace URL with local path
+                                if image_url in downloaded_images:
+                                    local_path = downloaded_images[image_url]
+                                    rel_path = os.path.relpath(local_path, os.path.dirname(file_path))
+                                    line['text_display'] = line['text_display'].replace(
+                                        f'![{alt_text}]({image_url})', 
+                                        f'![{alt_text}]({rel_path})'
+                                    )
+                                    replacement_count += 1
+                            
+                            # Also find and replace any raw URLs (not in markdown syntax)
+                            raw_urls = re.findall(pattern, line['text_display'])
+                            for url in raw_urls:
+                                # Skip URLs already handled by markdown pattern
+                                if any(url == match[1] for match in matches):
+                                    continue
+                                
+                                # Download the image if not already downloaded
+                                if url not in downloaded_images:
+                                    local_path = download_mathpix_image(url, output_dir)
+                                    if local_path:
+                                        downloaded_images[url] = local_path
+                                
+                                # Replace URL with local path
+                                if url in downloaded_images:
+                                    local_path = downloaded_images[url]
+                                    rel_path = os.path.relpath(local_path, os.path.dirname(file_path))
+                                    line['text_display'] = line['text_display'].replace(url, rel_path)
+                                    replacement_count += 1
+
+        # Write the updated content back to the file
+        if downloaded_images:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(content, f, indent=2)
+            
+            logger.info(f"Updated {replacement_count} image links in {file_path}")
+            logger.info(f"Downloaded {len(downloaded_images)} images from {file_path}")
         
         return len(downloaded_images)
         
