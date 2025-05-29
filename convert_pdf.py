@@ -487,7 +487,12 @@ class MathpixClient:
         """
         pdf_name = os.path.basename(pdf_path)
         logger.info(f"[{pdf_name}] Submitting PDF...")
-        logger.debug(f"[{pdf_name}] POST request with options: {options}")
+
+        # Add metadata to ensure privacy
+        options_with_privacy = options.copy()
+        options_with_privacy["metadata"] = {"improve_mathpix": False}
+        
+        logger.debug(f"[{pdf_name}] POST request with options: {options_with_privacy}")
         
         async with httpx.AsyncClient(timeout=self.default_timeout) as client:
             with open(pdf_path, "rb") as f:
@@ -501,7 +506,7 @@ class MathpixClient:
                     # Use original filename
                     files = {"file": f}
                 
-                data = {"options_json": json.dumps(options)}
+                data = {"options_json": json.dumps(options_with_privacy)}
                 
                 resp = await client.post(
                     self.PDF_ENDPOINT,
