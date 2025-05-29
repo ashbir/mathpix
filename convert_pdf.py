@@ -840,7 +840,7 @@ class PDFConverter:
             pdf_path: Path to the PDF file
             out_path: Path to save the output file
             anonymize_method: Method to anonymize filename
-            download_images: Whether to download images from Mathpix CDN (Note: current logic doesn't directly use this for API options)
+            download_images: Whether to download images from Mathpix CDN and update links
             use_streaming: If True, attempt streaming conversion. Otherwise, use polling.
             
         Returns:
@@ -859,30 +859,50 @@ class PDFConverter:
             current_api_options["streaming"] = True
             logger.info(f"[{pdf_name}] Attempting conversion with streaming enabled.")
             
-            pdf_id = await self.client.post_pdf(pdf_path, api_pdf_name, current_api_options)
+            # Call the correct method: submit_pdf
+            # submit_pdf handles anonymization internally based on anonymize_method
+            response_json = await self.client.submit_pdf(pdf_path, current_api_options, anonymize_method)
+            pdf_id = response_json.get("pdf_id") # Extract pdf_id from response
+            
             if not pdf_id:
-                raise RuntimeError(f"Failed to submit PDF {pdf_name} (API name: {api_pdf_name}) to Mathpix API for streaming.")
+                raise RuntimeError(f"Failed to submit PDF {pdf_name} (anonymize: {anonymize_method}) to Mathpix API for streaming. Response: {response_json}")
             
             try:
                 pages_received, total_pages = await self._handle_streaming(pdf_id, pdf_name, out_path)
                 # Pass self.skip_status_check, which was set during PDFConverter init
                 await self.check_final_status(pdf_id, pdf_name, self.skip_status_check)
+                if download_images:
+                    logger.info(f"[{pdf_name}] Processing downloaded MMD file for image localization: {out_path}")
+                    process_markdown_images(out_path, download_images=True)
                 return pdf_id, pages_received, total_pages
             except Exception as e_stream_handle:
                 logger.warning(f"[{pdf_name}] Streaming handle failed for {pdf_id} ({pdf_name}): {e_stream_handle}. Attempting fallback download.")
                 # Fallback for streaming failure, pdf_id is known
-                return await self.fallback_download(pdf_id, pdf_name, out_path)
+                # Ensure fallback_download also respects download_images
+                pdf_id, pages_received, total_pages = await self.fallback_download(pdf_id, pdf_name, out_path)
+                if download_images and os.path.exists(out_path): # Check if fallback created the file
+                    logger.info(f"[{pdf_name}] Processing downloaded MMD file (after fallback) for image localization: {out_path}")
+                    process_markdown_images(out_path, download_images=True)
+                return pdf_id, pages_received, total_pages
         else: # Not using streaming (default behavior)
             logger.info(f"[{pdf_name}] Converting PDF using polling and download (streaming not enabled).")
             current_api_options.pop("streaming", None) # Ensure streaming is not in options for post_pdf call
 
-            pdf_id = await self.client.post_pdf(pdf_path, api_pdf_name, current_api_options)
+            # Call the correct method: submit_pdf
+            # submit_pdf handles anonymization internally based on anonymize_method
+            response_json = await self.client.submit_pdf(pdf_path, current_api_options, anonymize_method)
+            pdf_id = response_json.get("pdf_id") # Extract pdf_id from response
+
             if not pdf_id:
-                raise RuntimeError(f"Failed to submit PDF {pdf_name} (API name: {api_pdf_name}) to Mathpix API for non-streaming conversion.")
+                raise RuntimeError(f"Failed to submit PDF {pdf_name} (anonymize: {anonymize_method}) to Mathpix API for non-streaming conversion. Response: {response_json}")
             
             logger.info(f"[{pdf_name}] PDF submitted (ID: {pdf_id}). Polling for completion and downloading.")
             # fallback_download handles polling for status and then downloads the MMD
-            return await self.fallback_download(pdf_id, pdf_name, out_path)
+            pdf_id, pages_received, total_pages = await self.fallback_download(pdf_id, pdf_name, out_path)
+            if download_images and os.path.exists(out_path): # Check if fallback created the file
+                logger.info(f"[{pdf_name}] Processing downloaded MMD file for image localization: {out_path}")
+                process_markdown_images(out_path, download_images=True)
+            return pdf_id, pages_received, total_pages
 
     async def _wait_for_format_completion(self, pdf_id: str, format_ext: str, max_wait_time: int = 60) -> bool:
         """Wait for a specific format conversion to complete
