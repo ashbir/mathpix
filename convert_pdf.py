@@ -425,7 +425,7 @@ class ConditionalLogger:
         self.verbose = verbose
         if verbose and not self.logger.handlers:
             self.handler = logging.StreamHandler()
-            self.handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            self.handler.setFormatter(logging.Formatter('%(asctime)s - %(levellevelname)s - %(message)s'))
             self.logger.addHandler(self.handler)
             self.logger.setLevel(logging.INFO)
         elif not verbose and self.logger.handlers:
@@ -826,86 +826,64 @@ class MathpixClient:
 class PDFConverter:
     """Handles the conversion of PDFs to Mathpix Markdown"""
     
-    def __init__(self, client: MathpixClient, options: Dict[str, Any] = None, show_progress: bool = True):
+    def __init__(self, client: MathpixClient, options: Dict[str, Any] = None, show_progress: bool = True, skip_status_check: bool = False):
         self.client = client
         self.options = options or {}
         self.show_progress = show_progress
+        self.skip_status_check = skip_status_check # Store this
         
-    async def convert_with_streaming(self, pdf_path: str, out_path: str, anonymize_method: str = 'hash', download_images: bool = True) -> Tuple[str, int, int]:
+    async def convert_pdf(self, pdf_path: str, out_path: str, anonymize_method: str = 'hash', download_images: bool = True, use_streaming: bool = False) -> Tuple[str, int, int]:
         """
-        Convert a PDF to MMD using streaming API
+        Convert a PDF to MMD, with optional streaming.
         
         Args:
             pdf_path: Path to the PDF file
             out_path: Path to save the output file
             anonymize_method: Method to anonymize filename
-            download_images: Whether to download images from Mathpix CDN
+            download_images: Whether to download images from Mathpix CDN (Note: current logic doesn't directly use this for API options)
+            use_streaming: If True, attempt streaming conversion. Otherwise, use polling.
             
         Returns:
             Tuple[str, int, int]: (pdf_id, pages_received, total_pages)
         """
         pdf_name = os.path.basename(pdf_path)
+        current_api_options = {**self.options} # Options for Mathpix API
+
+        # Anonymize filename for API
+        # Ensure get_anonymized_filename is accessible in this scope (it's global in the script)
+        api_pdf_name = get_anonymized_filename(pdf_path, anonymize_method)
         
-        # Add streaming option
-        options = {**self.options, "streaming": True}
-        
-        try:
-            # 1. Submit PDF
-            response = await self.client.submit_pdf(pdf_path, options, anonymize_method)
-            pdf_id = response["pdf_id"]
-            logger.info(f"[{pdf_name}] submitted → pdf_id={pdf_id}")
+        pdf_id = None
+
+        if use_streaming:
+            current_api_options["streaming"] = True
+            logger.info(f"[{pdf_name}] Attempting conversion with streaming enabled.")
             
-            # 2. Stream results and write to file incrementally
-            result = await self._handle_streaming(pdf_id, pdf_name, out_path)
+            pdf_id = await self.client.post_pdf(pdf_path, api_pdf_name, current_api_options)
+            if not pdf_id:
+                raise RuntimeError(f"Failed to submit PDF {pdf_name} (API name: {api_pdf_name}) to Mathpix API for streaming.")
             
-            # 3. Download images if requested
-            if download_images:
-                logger.info(f"[{pdf_name}] Downloading images from MMD file")
-                if not self.show_progress:
-                    # Show minimal message if not verbose
-                    print(f"Downloading images for {pdf_name}...")
-                
-                # Process the markdown file to download images
-                image_count = process_markdown_images(out_path, download_images)
-                
-                # Also process any conversion formats specified in options
-                if "conversion_formats" in self.options and self.options["conversion_formats"]:
-                    conversion_formats = self.options["conversion_formats"]
-                    for format_key, enabled in conversion_formats.items():
-                        if not enabled:
-                            continue
-                        
-                        # Get the format extension (.md, .docx, etc.)
-                        format_ext = format_key
-                        
-                        # Process images for any markdown-based formats
-                        if format_ext in ["md"]:
-                            format_path = os.path.splitext(out_path)[0] + f".{format_ext}"
-                            # Wait for the conversion to complete
-                            await self._wait_for_format_completion(pdf_id, format_ext)
-                            
-                            # If the file exists, process images
-                            if os.path.exists(format_path):
-                                logger.info(f"[{pdf_name}] Processing images in {format_ext} output")
-                                process_markdown_images(format_path, download_images)
-                
-                if not self.show_progress and image_count > 0:
-                    # Show minimal success message if not verbose
-                    print(f"✅ Downloaded {image_count} images for {pdf_name}")
-            
-            return result
-                    
-        except Exception as e:
-            logger.error(f"[{pdf_name}] Conversion failed: {e}")
-            logger.error(traceback.format_exc())
-            
-            # If we have a pdf_id but streaming failed, we can fall back
-            if 'pdf_id' in locals():
-                logger.info(f"[{pdf_name}] Attempting fallback to non-streaming method...")
+            try:
+                pages_received, total_pages = await self._handle_streaming(pdf_id, pdf_name, out_path)
+                # Pass self.skip_status_check, which was set during PDFConverter init
+                await self.check_final_status(pdf_id, pdf_name, self.skip_status_check)
+                return pdf_id, pages_received, total_pages
+            except Exception as e_stream_handle:
+                logger.warning(f"[{pdf_name}] Streaming handle failed for {pdf_id} ({pdf_name}): {e_stream_handle}. Attempting fallback download.")
+                # Fallback for streaming failure, pdf_id is known
                 return await self.fallback_download(pdf_id, pdf_name, out_path)
-            else:
-                raise
-                
+        else: # Not using streaming (default behavior)
+            logger.info(f"[{pdf_name}] Converting PDF using polling and download (streaming not enabled).")
+            current_api_options.pop("streaming", None) # Ensure streaming is not in options for post_pdf call
+
+            pdf_id = await self.client.post_pdf(pdf_path, api_pdf_name, current_api_options)
+            if not pdf_id:
+                raise RuntimeError(f"Failed to submit PDF {pdf_name} (API name: {api_pdf_name}) to Mathpix API for non-streaming conversion.")
+            
+            logger.info(f"[{pdf_name}] PDF submitted (ID: {pdf_id}). Polling for completion and downloading.")
+            # fallback_download handles polling for status and then downloads the MMD
+            return await self.fallback_download(pdf_id, pdf_name, out_path)
+
     async def _wait_for_format_completion(self, pdf_id: str, format_ext: str, max_wait_time: int = 60) -> bool:
         """Wait for a specific format conversion to complete
         
@@ -1195,13 +1173,15 @@ class PDFConverter:
 class BatchProcessor:
     """Handles batch processing of multiple PDFs"""
     
-    def __init__(self, client: MathpixClient, options: Dict[str, Any], skip_status_check: bool = False, show_progress: bool = True, download_images: bool = True):
+    def __init__(self, client: MathpixClient, options: Dict[str, Any], skip_status_check: bool = False, show_progress: bool = True, download_images: bool = True, use_streaming: bool = False):
         self.client = client
-        self.options = options
+        self.options = options # Base options for conversion
         self.skip_status_check = skip_status_check
         self.show_progress = show_progress
-        self.download_images = download_images
-        self.converter = PDFConverter(client, options, show_progress)
+        self.download_images = download_images # For BatchProcessor logic/passed to converter
+        self.use_streaming = use_streaming # Store the streaming preference
+        # Pass relevant options to PDFConverter
+        self.converter = PDFConverter(client, self.options, show_progress, self.skip_status_check)
         
     async def count_total_pages(self, pdfs: List[str]) -> int:
         """Count total pages across all PDFs"""
@@ -1274,11 +1254,12 @@ class BatchProcessor:
                         print(f"\nProcessing {i+1}/{len(pdfs)}: {os.path.basename(pdf)}")
                     logger.info(f"Processing PDF {i+1}/{len(pdfs)}: {os.path.basename(pdf)}")
                     
-                    result = await self.converter.convert_with_streaming(
+                    result = await self.converter.convert_pdf( # Call renamed method
                         pdf, 
                         out_file, 
                         anonymize_method, 
-                        self.download_images
+                        download_images=self.download_images, # Pass along the flag
+                        use_streaming=self.use_streaming    # Pass the streaming preference
                     )
                     
                     if isinstance(result, tuple) and len(result) == 3:
@@ -1366,12 +1347,16 @@ def parse_args():
     p.add_argument("input", help="Path to PDF file or directory of PDFs", nargs='?')
     p.add_argument("-o", "--out-dir",
                    help="Directory to write .mmd files (default: same as PDF folder)")
+    p.add_argument("-o", "--out-dir",
+                   help="Directory to write .mmd files (default: same as PDF folder)")
     p.add_argument("-v", "--verbose", action="store_true", 
                    help="Enable verbose logging")
     p.add_argument("--skip-status-check", action="store_true",
                    help="Skip final status check (use when all pages are received via streaming)")
     p.add_argument("--silent", action="store_true",
                    help="Hide progress bars (only show log messages)")
+    p.add_argument("--use-streaming", action="store_true", default=False, 
+                   help="Enable streaming conversion (default: False, uses polling and download)")
     p.add_argument("--anonymize", choices=["hash", "uuid", "simple", "none"], default="hash",
                    help="Method to anonymize filenames when sending to Mathpix (default: hash)")
     p.add_argument("--check-hash", help="Check what the anonymized filename would be for a given PDF file")
@@ -1660,7 +1645,8 @@ async def async_main():
         options, 
         args.skip_status_check, 
         not args.silent,
-        not args.no_images  # Download images by default unless --no-images is specified
+        not args.no_images,  # This becomes `download_images` for BatchProcessor
+        use_streaming=args.use_streaming # Pass the new CLI arg
     )
     
     await batch_processor.process_all(pdfs, out_dir, args.anonymize)
