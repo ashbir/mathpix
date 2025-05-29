@@ -1363,45 +1363,64 @@ class BatchProcessor:
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Batch‑convert a folder of PDFs to Mathpix‑Markdown using streaming")
-    p.add_argument("input", help="Path to PDF file or directory of PDFs", nargs='?')
-    p.add_argument("-o", "--out-dir",
-                   help="Directory to write .mmd files (default: same as PDF folder)")
-    p.add_argument("-v", "--verbose", action="store_true", 
-                   help="Enable verbose logging")
-    p.add_argument("--skip-status-check", action="store_true",
-                   help="Skip final status check (use when all pages are received via streaming)")
-    p.add_argument("--silent", action="store_true",
-                   help="Hide progress bars (only show log messages)")
-    p.add_argument("--use-streaming", action="store_true", default=False, 
-                   help="Enable streaming conversion (default: False, uses polling and download)")
-    p.add_argument("--anonymize", choices=["hash", "uuid", "simple", "none"], default="hash",
-                   help="Method to anonymize filenames when sending to Mathpix (default: hash)")
-    p.add_argument("--check-hash", help="Check what the anonymized filename would be for a given PDF file")
-    p.add_argument("--list-documents", action="store_true",
-                   help="List all documents previously processed by the Mathpix API")
-    p.add_argument("--delete-document", 
-                   help="Delete a document from the Mathpix server using its PDF ID")
-    p.add_argument("--page", type=int, default=1,
-                   help="Page number for listing documents (default: 1)")
-    p.add_argument("--per-page", type=int, default=50,
-                   help="Number of documents per page (default: 50)")
-    p.add_argument("--from-date", 
-                   help="Filter documents from this date (format: YYYY-MM-DD)")
-    p.add_argument("--to-date", 
-                   help="Filter documents to this date (format: YYYY-MM-DD)")
-    p.add_argument("--download-document", 
-                   help="Download a document from the Mathpix server using its PDF ID")
-    p.add_argument("--output-format", 
-                   help="Format to download the document (default: mmd)", default="mmd")
-    p.add_argument("--output-path", 
-                   help="Path to save the downloaded document")
-    p.add_argument("--skip-existence-check", action="store_true",
-                   help="Skip existence check for documents in list (default: False)")
-    p.add_argument("--no-images", action="store_true",
-                   help="Don't download images from Mathpix CDN (default: False)")
-    p.add_argument("--download-images", action="store_true",
-                   help="Force download images for existing MMD files")
+        description="Batch‑convert a folder of PDFs to Mathpix‑Markdown, with additional document management features.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter # Provides better help formatting
+    )
+
+    # Group 1: Core Conversion Options
+    core_group = p.add_argument_group("Core Conversion Options", "Options for the primary PDF to MMD conversion task")
+    core_group.add_argument("input", help="Path to PDF file or directory of PDFs to convert", nargs='?')
+    core_group.add_argument("-o", "--out-dir",
+                            help="Directory to write converted .mmd files (default: same as PDF folder)")
+
+    # Group 2: Conversion Control
+    conversion_control_group = p.add_argument_group("Conversion Control", "Options to control the behavior of the conversion process")
+    conversion_control_group.add_argument("--use-streaming", action="store_true", default=False,
+                                          help="Enable streaming conversion (default: False, uses polling and download)")
+    conversion_control_group.add_argument("--anonymize", choices=["hash", "uuid", "simple", "none"], default="hash",
+                                          help="Method to anonymize filenames when sending to Mathpix")
+    conversion_control_group.add_argument("--no-images", action="store_true",
+                                          help="Don't download images from Mathpix CDN for newly converted files (default: images are downloaded)")
+    conversion_control_group.add_argument("--skip-status-check", action="store_true",
+                                          help="Skip final status check (useful if streaming reliably provides all pages)")
+
+    # Group 3: Document Management (Mathpix API)
+    doc_management_group = p.add_argument_group("Document Management (Mathpix API)", "Options for managing documents on the Mathpix server")
+    doc_management_group.add_argument("--list-documents", action="store_true",
+                                      help="List documents stored on the Mathpix server")
+    doc_management_group.add_argument("--page", type=int, default=1,
+                                      help="Page number for listing documents")
+    doc_management_group.add_argument("--per-page", type=int, default=50,
+                                      help="Number of documents per page when listing")
+    doc_management_group.add_argument("--from-date",
+                                      help="Filter listed documents from this date (YYYY-MM-DD)")
+    doc_management_group.add_argument("--to-date",
+                                      help="Filter listed documents up to this date (YYYY-MM-DD)")
+    doc_management_group.add_argument("--skip-existence-check", action="store_true",
+                                      help="Skip checking if listed documents still exist on the server")
+    doc_management_group.add_argument("--delete-document",
+                                      help="Delete a document from Mathpix server by its PDF ID")
+    doc_management_group.add_argument("--download-document",
+                                      help="Download a specific document from Mathpix server by its PDF ID")
+    doc_management_group.add_argument("--output-format", default="mmd",
+                                      help="Format for --download-document (e.g., mmd, docx, tex.zip, html, pdf, lines.json)")
+    doc_management_group.add_argument("--output-path",
+                                      help="Specific output file path for --download-document")
+
+    # Group 4: Local File Utilities
+    local_utils_group = p.add_argument_group("Local File Utilities", "Utilities for working with local files")
+    local_utils_group.add_argument("--check-hash",
+                                   help="Check the anonymized filename for a given local PDF file (uses --anonymize method)")
+    local_utils_group.add_argument("--download-images", action="store_true",
+                                   help="Download images for existing local MMD, MD, or Mathpix JSON files. Requires 'input' to be a file or directory.")
+
+    # Group 5: Logging & Display
+    display_group = p.add_argument_group("Logging & Display", "Options for controlling script output and progress indication")
+    display_group.add_argument("-v", "--verbose", action="store_true",
+                               help="Enable verbose logging for detailed process information")
+    display_group.add_argument("--silent", action="store_true",
+                               help="Hide progress bars (log messages will still be shown based on verbosity)")
+    
     return p.parse_args()
 
 def get_pdf_list(path):

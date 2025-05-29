@@ -40,32 +40,37 @@ MATHPIX_APP_KEY=your_app_key
 
 ## Usage
 
-### Converting PDFs
+The script offers a range of functionalities, from basic PDF conversion to detailed document management on the Mathpix server. CLI arguments are organized into logical groups for clarity. To see all available options and their groupings, run:
 
-Convert a single PDF:
+```bash
+python convert_pdf.py --help
+```
 
+### Basic PDF Conversion
+
+Convert a single PDF to Mathpix Markdown (.mmd):
 ```bash
 python convert_pdf.py /path/to/your.pdf
 ```
 
 Convert all PDFs in a directory:
-
 ```bash
-python convert_pdf.py /path/to/directory/
+python convert_pdf.py /path/to/your_directory/
 ```
 
-Specify an output directory:
-
+Specify an output directory for the converted files:
 ```bash
 python convert_pdf.py /path/to/your.pdf -o /output/directory/
+# or
+python convert_pdf.py /path/to/your.pdf --out-dir /output/directory/
 ```
 
-Note: During conversion to MMD, referenced images are automatically downloaded to a local directory (named after the MMD file, e.g., `your.mmd` images go into `your/` subdirectory) and the links within the MMD are updated to point to these local images. This behavior is typically on by default but might be controllable with a command-line flag (e.g., `--no-download-images` or `--download-images false` if implemented in the CLI).
+### Conversion Control
 
-### Anonymizing Filenames
+Control various aspects of the PDF conversion process.
 
-Filenames are anonymized by default using MD5 hash to allow tracking. You can change the anonymization method:
-
+**Anonymizing Filenames:**
+Filenames sent to Mathpix can be anonymized. This is controlled by the `--anonymize` option (default is `hash`).
 ```bash
 # Hash-based anonymization (default) - consistent names for the same file
 python convert_pdf.py document.pdf --anonymize hash
@@ -80,83 +85,94 @@ python convert_pdf.py document.pdf --anonymize simple
 python convert_pdf.py document.pdf --anonymize none
 ```
 
-Check what an anonymized filename would be:
-
+**Image Handling in Conversion:**
+By default, the Mathpix API includes image data in the generated MMD. You can prevent this:
 ```bash
-python convert_pdf.py --check-hash /path/to/your.pdf
+# Do not include images in the output MMD from the Mathpix API
+python convert_pdf.py /path/to/your.pdf --no-images
 ```
 
-### Document Management
-
-List documents stored on the Mathpix server:
-
-```bash
-python convert_pdf.py --list-documents
-```
-
-Use pagination for large document lists:
-
-```bash
-python convert_pdf.py --list-documents --page 2 --per-page 50
-```
-
-Filter documents by date:
-
-```bash
-python convert_pdf.py --list-documents --from-date 2023-01-01 --to-date 2023-12-31
-```
-
-Download a document from the Mathpix server:
-
-```bash
-python convert_pdf.py --download-document YOUR_PDF_ID
-```
-
-Download a document in a specific format:
-
-```bash
-python convert_pdf.py --download-document YOUR_PDF_ID --output-format docx
-```
-
-Available download formats:
-- `mmd` (Mathpix Markdown - default)
-- `md` (Standard Markdown)
-- `docx` (Microsoft Word)
-- `tex.zip` (LaTeX source with images)
-- `pdf` (PDF with HTML rendering)
-- `latex.pdf` (PDF with LaTeX rendering)
-- `html` (HTML format)
-- `lines.json` (Structured line-by-line data; referenced Mathpix images are downloaded and paths updated to local versions)
-- `lines.mmd.json` (Line-by-line MMD data; referenced Mathpix images are downloaded and paths updated to local versions)
-
-Specify an output path for downloaded documents:
-
-```bash
-python convert_pdf.py --download-document YOUR_PDF_ID --output-format docx --output-path ~/Downloads/document.docx
-```
-
-Delete a document from the Mathpix server:
-
-```bash
-python convert_pdf.py --delete-document YOUR_PDF_ID
-```
-
-### Advanced Options
-
-Enable verbose logging:
-
-```bash
-python convert_pdf.py /path/to/your.pdf -v
-```
-
-Skip final status check (faster processing when using streaming):
-
+**Streaming and Status Checks:**
+- Use streaming for faster real-time results (default is True, use `--use-streaming false` to disable).
+- Skip the final status check after streaming (can speed up processing if you trust the stream):
 ```bash
 python convert_pdf.py /path/to/your.pdf --skip-status-check
 ```
 
-Hide progress bars (useful for scripts):
+### Document Management (Mathpix API)
 
+Manage your documents on the Mathpix server.
+
+**List Documents:**
+```bash
+python convert_pdf.py --list-documents
+```
+Use pagination for large document lists:
+```bash
+python convert_pdf.py --list-documents --page 2 --per-page 50
+```
+Filter documents by date:
+```bash
+python convert_pdf.py --list-documents --from-date 2023-01-01 --to-date 2023-12-31
+```
+
+**Download Documents:**
+Download a previously processed document from Mathpix by its PDF ID:
+```bash
+python convert_pdf.py --download-document YOUR_PDF_ID
+```
+Download in a specific format (default is `mmd`):
+```bash
+python convert_pdf.py --download-document YOUR_PDF_ID --output-format docx
+```
+Available download formats: `mmd`, `md`, `docx`, `tex.zip`, `pdf`, `latex.pdf`, `html`, `lines.json`, `lines.mmd.json`.
+Specify an output path for the downloaded document:
+```bash
+python convert_pdf.py --download-document YOUR_PDF_ID --output-format docx --output-path ~/Downloads/document.docx
+```
+Note: When downloading `mmd`, `lines.json`, or `lines.mmd.json` formats, if the `--download-images` flag (see Local File Utilities) is active (default), images referenced in these files will be downloaded locally, and paths updated.
+
+**Delete Documents:**
+```bash
+python convert_pdf.py --delete-document YOUR_PDF_ID
+```
+
+**Existence Check:**
+By default, the script checks if a document with the same anonymized name already exists on Mathpix to avoid re-processing. You can skip this:
+```bash
+python convert_pdf.py /path/to/your.pdf --skip-existence-check
+```
+
+### Local File Utilities
+
+Utilities for managing local files related to the conversion process.
+
+**Check Anonymized Filename:**
+See what the anonymized filename for a PDF would be without processing:
+```bash
+python convert_pdf.py --check-hash /path/to/your.pdf
+```
+
+**Local Image Downloading:**
+After an MMD, `lines.json`, or `lines.mmd.json` file is created (either via conversion or download), this tool can download images referenced in it from the Mathpix CDN to a local directory (e.g., `your_file.mmd` images go into `your_file/` subdirectory) and update the links within the document. This is enabled by default.
+```bash
+# Disable automatic local image downloading and link updating
+python convert_pdf.py /path/to/your.pdf --download-images false
+```
+This option also applies when using `--download-document` for relevant formats.
+
+### Logging & Display
+
+Control the script's output verbosity.
+
+Enable verbose logging:
+```bash
+python convert_pdf.py /path/to/your.pdf -v
+# or
+python convert_pdf.py /path/to/your.pdf --verbose
+```
+
+Hide progress bars and most non-error output (useful for scripting):
 ```bash
 python convert_pdf.py /path/to/your.pdf --silent
 ```
