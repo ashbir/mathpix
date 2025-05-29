@@ -1347,8 +1347,6 @@ def parse_args():
     p.add_argument("input", help="Path to PDF file or directory of PDFs", nargs='?')
     p.add_argument("-o", "--out-dir",
                    help="Directory to write .mmd files (default: same as PDF folder)")
-    p.add_argument("-o", "--out-dir",
-                   help="Directory to write .mmd files (default: same as PDF folder)")
     p.add_argument("-v", "--verbose", action="store_true", 
                    help="Enable verbose logging")
     p.add_argument("--skip-status-check", action="store_true",
